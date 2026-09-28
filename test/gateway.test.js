@@ -95,6 +95,30 @@ test("還有未結案的件時再傳 → 留言到同一個 issue，不開新件
   assert.match(replies(t.calls)[0].body.messages[0].text, /接著改 #7/);
 });
 
+test("舊件已在 GitHub 上關掉（關閉事件漏接）→ 新訊息開新件，不會卡在舊件", async () => {
+  const closed = [];
+  const t = setup({ closedIssues: closed });
+  await t.line([textEvent(STAFF, "營業時間改成週日公休")]); // 開 #7
+  closed.push(7); // 有人直接在 GitHub 上關掉 #7，Worker 沒收到事件
+  t.clearCalls();
+  await t.line([textEvent(STAFF, "全站底色改成 #20C7B6")]);
+  assert.equal(comments(t.calls).length, 0);
+  assert.equal(createdIssues(t.calls).length, 1);
+  assert.equal((await t.env.STATE.get("req:7", "json")).state, "closed");
+  assert.equal(await t.env.STATE.get(`user:${STAFF}`), "8");
+  assert.match(replies(t.calls)[0].body.messages[0].text, /#8/);
+});
+
+test("舊件還開著 → 照舊接著改（有先向 GitHub 確認）", async () => {
+  const t = setup();
+  await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
+  t.clearCalls();
+  await t.line([textEvent(STAFF, "字再大一點")]);
+  assert.equal(ghCalls(t.calls, "GET", "/issues/7").length, 1);
+  assert.equal(comments(t.calls).length, 1);
+  assert.equal(createdIssues(t.calls).length, 0);
+});
+
 test("非文字訊息 → 回覆只看得懂文字", async () => {
   const t = setup();
   const ev = textEvent(STAFF, "");

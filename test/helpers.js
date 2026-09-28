@@ -44,7 +44,7 @@ export function makeEnv() {
 }
 
 // 記錄所有對外呼叫，依網址回假資料
-export function fakeFetch({ nextIssue = 7, mergeOk = true } = {}) {
+export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [] } = {}) {
   const calls = [];
   const impl = async (url, init = {}) => {
     const method = init.method ?? "GET";
@@ -53,7 +53,9 @@ export function fakeFetch({ nextIssue = 7, mergeOk = true } = {}) {
     const json = (data, status = 200) =>
       new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
     if (String(url).includes("/profile/")) return json({ displayName: "阿姨" });
-    if (String(url).endsWith("/issues") && method === "POST") return json({ number: nextIssue }, 201);
+    if (String(url).endsWith("/issues") && method === "POST") return json({ number: nextIssue++ }, 201);
+    const issueGet = method === "GET" && /\/issues\/(\d+)$/.exec(String(url));
+    if (issueGet) return json({ state: closedIssues.includes(Number(issueGet[1])) ? "closed" : "open" });
     if (String(url).includes("/merge")) return mergeOk ? json({ merged: true }) : json({ message: "conflict" }, 405);
     return json({});
   };
@@ -63,6 +65,7 @@ export function fakeFetch({ nextIssue = 7, mergeOk = true } = {}) {
 export function setup(opts = {}) {
   const env = makeEnv();
   const f = fakeFetch(opts);
+  f.closedIssues = opts.closedIssues;
   let clock = opts.now ?? Date.parse("2026-09-28T10:00:00Z");
   const deps = makeDeps(env, f.impl, () => clock);
   return {

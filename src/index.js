@@ -112,6 +112,15 @@ async function handleText(ev, userId, env, deps) {
   // 這個人還有未結案的件 → 視為追加修改，留言到同一個 issue
   const openIssue = await st.openIssueOf(userId);
   const existing = openIssue ? await st.getRequest(openIssue) : null;
+  // 先向 GitHub 確認那件還開著：有人直接在 GitHub 上關掉、或關閉事件漏接時，就當作結案、改開新件
+  if (existing?.state === "open") {
+    const live = await gh.getIssue(existing.issue);
+    if (live.ok && live.data?.state === "closed") {
+      existing.state = "closed";
+      await st.putRequest(existing);
+      await st.clearOpenIssue(userId, existing.issue);
+    }
+  }
   if (existing?.state === "open") {
     const res = await gh.comment(existing.issue, `${text}\n\n— ${existing.name ?? "LINE"}（LINE 追加）`);
     if (!res.ok) return line.reply(ev.replyToken, [msg.failed()]);
