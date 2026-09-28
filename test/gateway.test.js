@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handleScheduled, parseMarker, previewUrlFor } from "../src/index.js";
+import { handleFetch, handleScheduled, makeDeps, parseMarker, previewUrlFor } from "../src/index.js";
+import { signLine } from "../src/crypto.js";
 import {
   APPROVER, STAFF, STRANGER,
-  setup, textEvent, postbackEvent, workflowComment, pagesCheckRun, readyBody,
+  makeEnv, setup, textEvent, postbackEvent, workflowComment, pagesCheckRun, readyBody,
   pushes, replies, ghCalls,
 } from "./helpers.js";
 
@@ -317,4 +318,35 @@ test("previewUrlFor 依 Cloudflare 規則轉分支名", () => {
   const env = { PAGES_PROJECT: "my-site" };
   assert.equal(previewUrlFor(env, "line/7"), "https://line-7.my-site.pages.dev");
   assert.equal(previewUrlFor(env, "Fix/API"), "https://fix-api.my-site.pages.dev");
+});
+
+// ── 回應時機 ──
+
+test("LINE webhook 先回 200，GitHub 呼叫在背景做完（不會因 LINE 斷線而被取消）", async () => {
+  const env = makeEnv();
+  const calls = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  // 假的 fetch：GitHub 呼叫要等 gate 放行才回應，模擬 API 很慢
+  const slowFetch = async (url, init = {}) => {
+    calls.push(String(url));
+    if (String(url).includes("api.github.com")) await gate;
+    const data = String(url).endsWith("/issues") ? { number: 7 } : { displayName: "阿姨" };
+    return new Response(JSON.stringify(data), { status: 200 });
+  };
+  const deps = makeDeps(env, slowFetch, () => T0);
+  const ctx = { tasks: [], waitUntil(p) { this.tasks.push(p); } };
+
+  const body = JSON.stringify({ events: [textEvent(STAFF, "營業時間改成週日公休")] });
+  const req = new Request("https://w.example/line/webhook", {
+    method: "POST", body, headers: { "x-line-signature": await signLine(env.LINE_CHANNEL_SECRET, body) },
+  });
+  const res = await handleFetch(req, env, deps, ctx);
+  assert.equal(res.status, 200);          // GitHub 還卡著，回應就已經出去了
+  assert.equal(ctx.tasks.length, 1);
+  assert.ok(!calls.some((u) => u.endsWith("/message/reply")));
+
+  release();
+  await Promise.all(ctx.tasks);            // 背景工作完成後，回覆照樣送出
+  assert.ok(calls.some((u) => u.endsWith("/message/reply")));
 });

@@ -19,7 +19,7 @@ const WORKFLOW_BOT = "github-actions[bot]";
 
 export default {
   async fetch(request, env, ctx) {
-    return handleFetch(request, env, makeDeps(env));
+    return handleFetch(request, env, makeDeps(env), ctx);
   },
   async scheduled(event, env, ctx) {
     ctx.waitUntil(handleScheduled(env, makeDeps(env)));
@@ -35,7 +35,17 @@ export function makeDeps(env, fetchImpl = fetch, now = () => Date.now()) {
   };
 }
 
-export async function handleFetch(request, env, deps) {
+// 驗完簽章就立刻回 200，實際工作交給 ctx.waitUntil 在背景做完。
+// LINE 等不了太久：若等所有 GitHub 呼叫做完才回應，LINE 會先斷線，
+// Cloudflare 隨即取消這次執行，排在後面的回覆訊息就送不出去。
+// （測試時不傳 ctx，就照舊等工作做完再回應，方便檢查結果。）
+async function runInBackground(ctx, label, work) {
+  const safe = work.catch((err) => console.error(`${label} 失敗：${err?.stack ?? err}`));
+  if (ctx?.waitUntil) ctx.waitUntil(safe);
+  else await safe;
+}
+
+export async function handleFetch(request, env, deps, ctx) {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/") return new Response("line-dispatch ok");
   if (request.method !== "POST") return new Response("Not found", { status: 404 });
@@ -45,14 +55,15 @@ export async function handleFetch(request, env, deps) {
     if (!(await verifyLineSignature(env.LINE_CHANNEL_SECRET, body, request.headers.get("x-line-signature")))) {
       return new Response("Invalid signature", { status: 401 });
     }
-    await handleLineEvents(JSON.parse(body).events ?? [], env, deps);
+    await runInBackground(ctx, "LINE webhook", handleLineEvents(JSON.parse(body).events ?? [], env, deps));
     return new Response("ok");
   }
   if (url.pathname === "/github/webhook") {
     if (!(await verifyGithubSignature(env.GITHUB_WEBHOOK_SECRET, body, request.headers.get("x-hub-signature-256")))) {
       return new Response("Invalid signature", { status: 401 });
     }
-    await handleGithubEvent(request.headers.get("x-github-event"), JSON.parse(body), env, deps);
+    const event = request.headers.get("x-github-event");
+    await runInBackground(ctx, `GitHub ${event}`, handleGithubEvent(event, JSON.parse(body), env, deps));
     return new Response("ok");
   }
   return new Response("Not found", { status: 404 });
