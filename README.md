@@ -73,7 +73,7 @@ npx wrangler kv namespace create STATE
 
 ### 4. 設定 secrets
 
-逐一執行，每次會要你貼上值：
+逐一執行，每次會要你貼上值。第一次會問 `There doesn't seem to be a Worker called "line-dispatch"...`，回答 `y`（先建一個空的 Worker 存 secret，第 5 步部署時程式會放進去，secret 保留）：
 
 ```powershell
 npx wrangler secret put LINE_CHANNEL_SECRET         # LINE Developers → channel → Basic settings
