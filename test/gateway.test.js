@@ -108,6 +108,17 @@ test("舊件已在 GitHub 上關掉（關閉事件漏接）→ 新訊息開新�
   assert.match(replies(t.calls)[0].body.messages[0].text, /#8/);
 });
 
+test("舊件的 issue 被整個刪掉 → 新訊息開新件", async () => {
+  const deleted = [];
+  const t = setup({ deletedIssues: deleted });
+  await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
+  deleted.push(7);
+  t.clearCalls();
+  await t.line([textEvent(STAFF, "電話改成 06-1234567")]);
+  assert.equal(comments(t.calls).length, 0);
+  assert.equal(createdIssues(t.calls).length, 1);
+});
+
 test("舊件還開著 → 照舊接著改（有先向 GitHub 確認）", async () => {
   const t = setup();
   await t.line([textEvent(STAFF, "營業時間改成週日公休")]);

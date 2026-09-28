@@ -44,7 +44,7 @@ export function makeEnv() {
 }
 
 // 記錄所有對外呼叫，依網址回假資料
-export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [], issueComments = {} } = {}) {
+export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [], deletedIssues = [], issueComments = {} } = {}) {
   const calls = [];
   const impl = async (url, init = {}) => {
     const method = init.method ?? "GET";
@@ -57,6 +57,7 @@ export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [], is
     const commentList = method === "GET" && /\/issues\/(\d+)\/comments\?/.exec(String(url));
     if (commentList) return json(issueComments[commentList[1]] ?? []);
     const issueGet = method === "GET" && /\/issues\/(\d+)$/.exec(String(url));
+    if (issueGet && deletedIssues.includes(Number(issueGet[1]))) return json({ message: "Not Found" }, 404);
     if (issueGet) return json({ state: closedIssues.includes(Number(issueGet[1])) ? "closed" : "open" });
     if (String(url).includes("/merge")) return mergeOk ? json({ merged: true }) : json({ message: "conflict" }, 405);
     return json({});

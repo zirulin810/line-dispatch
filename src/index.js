@@ -118,7 +118,8 @@ async function handleText(ev, userId, env, deps) {
   // 先向 GitHub 確認那件還開著：有人直接在 GitHub 上關掉、或關閉事件漏接時，就當作結案、改開新件
   if (existing?.state === "open") {
     const live = await gh.getIssue(existing.issue);
-    if (live.ok && live.data?.state === "closed") {
+    // 已關閉，或整個 issue 被刪掉（404／410）都當作結案
+    if ((live.ok && live.data?.state === "closed") || live.status === 404 || live.status === 410) {
       existing.state = "closed";
       await st.putRequest(existing);
       await st.clearOpenIssue(userId, existing.issue);
