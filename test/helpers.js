@@ -44,7 +44,7 @@ export function makeEnv() {
 }
 
 // 記錄所有對外呼叫，依網址回假資料
-export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [] } = {}) {
+export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [], issueComments = {} } = {}) {
   const calls = [];
   const impl = async (url, init = {}) => {
     const method = init.method ?? "GET";
@@ -54,6 +54,8 @@ export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [] } =
       new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
     if (String(url).includes("/profile/")) return json({ displayName: "阿姨" });
     if (String(url).endsWith("/issues") && method === "POST") return json({ number: nextIssue++ }, 201);
+    const commentList = method === "GET" && /\/issues\/(\d+)\/comments\?/.exec(String(url));
+    if (commentList) return json(issueComments[commentList[1]] ?? []);
     const issueGet = method === "GET" && /\/issues\/(\d+)$/.exec(String(url));
     if (issueGet) return json({ state: closedIssues.includes(Number(issueGet[1])) ? "closed" : "open" });
     if (String(url).includes("/merge")) return mergeOk ? json({ merged: true }) : json({ message: "conflict" }, 405);
@@ -132,8 +134,9 @@ export const pagesCheckRun = (branch, completedAt, conclusion = "success") => ({
   },
 });
 
-export const readyBody = (pr, issue, summary = "把關於我們的營業時間改成週日公休。") =>
-  `<!-- line-request:status=ready;pr=${pr};branch=line/${issue} -->\n${summary}\n\nPR：#${pr}（預覽網址會由 Cloudflare Pages 貼在 PR 上）`;
+export const readyBody = (pr, issue, summary = "把關於我們的營業時間改成週日公休。",
+  preview = `https://line-${issue}.my-site.pages.dev`) =>
+  `<!-- line-request:status=ready;pr=${pr};branch=line/${issue};preview=${preview} -->\n${summary}\n\n預覽：${preview}\nPR：#${pr}`;
 
 // 篩出某種呼叫
 export const pushes = (calls, to) =>

@@ -2,6 +2,9 @@
 //
 //   LINE  ──訊息──▶  /line/webhook   ──開 issue／留言──▶  GitHub（網站 repo）
 //   GitHub ──事件──▶  /github/webhook ──改好了＋預覽──▶     LINE（發訊息的人、我）
+//
+// 「改好了」只有一個來源：workflow 等 Cloudflare 預覽部署好之後，在 issue 留的那則回報。
+// Worker 收到就直接通知，不需要再等其他訊號。
 //   我在 LINE 按［上線］／［退回］ ──▶ 合併／關閉 PR
 //
 // 流程細節與部署步驟見 README.md。
@@ -13,8 +16,8 @@ import { msg } from "./messages.js";
 
 // GitHub 與 Cloudflare 的時鐘可能差一點，比對「這一輪之後才發生」時放寬 30 秒
 const CLOCK_SKEW_MS = 30_000;
-// 改好了卻一直等不到預覽完成的訊號時，最多等這麼久就先用推算的預覽網址通知
-const PREVIEW_FALLBACK_MS = 4 * 60_000;
+// 一輪開始後這麼久還沒收到 workflow 的回報，排程就直接去 GitHub 讀留言對帳（webhook 漏接時的保險）
+const RECONCILE_AFTER_MS = 5 * 60_000;
 const WORKFLOW_BOT = "github-actions[bot]";
 
 export default {
@@ -193,11 +196,11 @@ export function parseMarker(body) {
   const params = Object.fromEntries(
     m[2].split(";").filter(Boolean).map((kv) => kv.split("=")),
   );
-  // 給人看的部分：去掉標記行，以及 ready 時附的「PR：#…」那行
+  // 給人看的部分：去掉標記行，以及 ready 時附的「預覽：…」「PR：#…」兩行（Worker 會自己附預覽）
   const text = body
     .replace(MARKER, "")
     .split("\n")
-    .filter((l) => !/^PR：/.test(l.trim()))
+    .filter((l) => !/^(PR|預覽)：/.test(l.trim()))
     .join("\n")
     .trim();
   return { status: m[1], ...params, text };
@@ -226,21 +229,6 @@ export async function handleGithubEvent(event, payload, env, deps) {
     const req = await st.getRequest(payload.issue.number);
     if (!req || req.state !== "open" || !inThisRound(req, payload.comment.created_at)) return;
     await onWorkflowReport(req, marker, payload.comment.created_at, env, deps);
-    await st.putRequest(req);
-    return;
-  }
-
-  // Cloudflare Pages 部署完成（它在 GitHub 上以 check run 回報）
-  if (event === "check_run" && payload.action === "completed") {
-    const run = payload.check_run;
-    const app = `${run?.app?.slug ?? ""} ${run?.app?.name ?? ""}`.toLowerCase();
-    if (!app.includes("cloudflare") || run.conclusion !== "success") return;
-    const issue = issueOfBranch(run.check_suite?.head_branch);
-    const req = issue && (await st.getRequest(issue));
-    if (!req || req.state !== "open" || !inThisRound(req, run.completed_at)) return;
-    req.round.deployedAt = Date.parse(run.completed_at);
-    req.round.previewUrl = previewUrlFor(env, req.branch);
-    await maybeNotifyReady(req, env, deps);
     await st.putRequest(req);
     return;
   }
@@ -276,7 +264,8 @@ async function onWorkflowReport(req, marker, createdAt, env, deps) {
       round.summary = marker.text;
       if (marker.pr) req.pr = Number(marker.pr);
       if (marker.branch) req.branch = marker.branch;
-      await maybeNotifyReady(req, env, deps);
+      round.previewUrl = marker.preview || previewUrlFor(env, req.branch);
+      await notifyReady(req, env, deps);
       return;
     case "question":
     case "nochange":
@@ -292,12 +281,9 @@ async function onWorkflowReport(req, marker, createdAt, env, deps) {
   }
 }
 
-// 改好（ready）＋預覽部署完成（deployed）都到了才通知；fallback 時不等預覽訊號
-async function maybeNotifyReady(req, env, deps, { fallback = false } = {}) {
+async function notifyReady(req, env, deps) {
   const round = req.round;
-  if (round.status !== "ready" || round.notified) return;
-  if (!round.deployedAt && !fallback) return;
-  round.previewUrl ??= previewUrlFor(env, req.branch);
+  if (round.notified) return; // 同一則回報重送時不重複通知
   round.notified = true;
   const approver = env.APPROVER_USER_ID;
   await deps.line.push(approver, msg.readyForApprover(req));
@@ -308,10 +294,28 @@ async function maybeNotifyReady(req, env, deps, { fallback = false } = {}) {
 
 export async function handleScheduled(env, deps) {
   for (const req of await deps.st.listOpenRequests()) {
-    const r = req.round;
-    if (r.status === "ready" && !r.notified && deps.now() - r.readyAt > PREVIEW_FALLBACK_MS) {
-      await maybeNotifyReady(req, env, deps, { fallback: true });
-      await deps.st.putRequest(req);
+    try {
+      await reconcile(req, env, deps);
+    } catch (err) {
+      console.error(`排程處理 #${req.issue} 失敗：${err?.stack ?? err}`);
     }
   }
+}
+
+// GitHub 的 webhook 偶爾會漏送或送失敗；超過時間還沒收到回報，就以 GitHub 上的留言為準補做。
+async function reconcile(req, env, deps) {
+  const r = req.round;
+  if (r.notified || r.status !== "working") return;
+  if (deps.now() - r.startedAt <= RECONCILE_AFTER_MS) return;
+
+  const since = new Date(r.startedAt - CLOCK_SKEW_MS).toISOString();
+  const res = await deps.gh.listComments(req.issue, since);
+  const latest = (res.ok && Array.isArray(res.data) ? res.data : [])
+    .filter((c) => c.user?.login === WORKFLOW_BOT && inThisRound(req, c.created_at))
+    .map((c) => ({ marker: parseMarker(c.body), createdAt: c.created_at }))
+    .filter((x) => x.marker)
+    .at(-1);
+  if (!latest) return; // workflow 還在跑
+  await onWorkflowReport(req, latest.marker, latest.createdAt, env, deps);
+  await deps.st.putRequest(req);
 }

@@ -4,8 +4,7 @@
 //   req:<issue 編號>    → 件的資料（見 newRequest）
 //
 // 一件可以有很多「輪」：開件是第 1 輪，之後每則追加訊息開新的一輪。
-// 每一輪都要等兩個訊號才通知：workflow 回報改好（ready）＋ Cloudflare Pages 部署完成（deployed）。
-// 兩個訊號到的順序不一定，所以各自記下，湊齊才送。
+// 每一輪在收到 workflow 的回報（預覽已部署好）時通知一次。
 
 export function newRequest({ issue, userId, name, now }) {
   return {
@@ -26,7 +25,6 @@ export function newRound(now) {
     status: "working", // working | ready | question | nochange | error
     readyAt: null,
     summary: null,
-    deployedAt: null,
     previewUrl: null,
     notified: false,
   };

@@ -19,15 +19,15 @@ GitHub ──事件──▶ /github/webhook ──改好了＋預覽連結─�
 | 白名單的人傳文字 | 開帶 `line-request` 標籤的 issue，回「收到，處理中（#編號）」 |
 | 同一人還有未結案的件 | 改成留言到那個 issue（追加修改），回「收到，接著改」 |
 | 非白名單的人傳訊息 | 不理，只在紀錄裡留下 userId |
-| workflow 回報改好 **且** Pages 預覽部署完成 | 推給負責人（摘要＋預覽＋［看預覽］［上線］［退回］），也推給發訊息的人（摘要＋預覽） |
+| workflow 回報改好（它會等 Pages 預覽部署好才回報） | 推給負責人（摘要＋預覽＋［看預覽］［上線］［退回］），也推給發訊息的人（摘要＋預覽） |
 | workflow 反問／沒有要改的／失敗 | 把內容推給發訊息的人；失敗時也通知負責人 |
 | 負責人按［上線］ | squash 合併 PR、刪分支，通知雙方；issue 由 PR 的 `Closes #` 自動關閉 |
 | 負責人按［退回］ | 關 PR、關 issue、刪分支，通知發訊息的人 |
 | 其他人按按鈕、或按到舊一輪的按鈕 | 拒絕，不合併 |
 | 在 GitHub 上直接合併／關閉 | 同步狀態；合併時通知發訊息的人 |
 
-「預覽部署完成」的訊號是 Cloudflare Pages 在 GitHub 上的 check run。若 4 分鐘都沒等到，
-每 5 分鐘一次的排程會用推算的預覽網址（`https://line-<issue>.<專案>.pages.dev`）補送通知。
+GitHub 的 webhook 偶爾會漏送：一輪開始超過 5 分鐘還沒收到 workflow 的回報，每 5 分鐘一次的排程
+會直接去 GitHub 讀 issue 留言，照回報補做。
 
 ## 檔案
 
@@ -109,7 +109,7 @@ npx wrangler deploy
 - **Payload URL**：`<Worker 網址>/github/webhook`
 - **Content type**：`application/json`
 - **Secret**：第 4 步的 `GITHUB_WEBHOOK_SECRET`
-- **Which events**：Let me select individual events → 勾 **Check runs**、**Issue comments**、**Issues**、**Pull requests**（其他取消勾選）
+- **Which events**：Let me select individual events → 勾 **Issue comments**、**Issues**、**Pull requests**（其他取消勾選）
 
 ### 8. 加入店裡的人
 
@@ -128,7 +128,6 @@ npm run tail      # 看線上 Worker 的即時紀錄
 
 ## 已知限制
 
-- KV 不支援交易。「改好」與「預覽完成」兩個訊號剛好同時抵達時，其中一個的紀錄可能被蓋掉，
-  這時通知會延後到下一次排程（最多約 5 分鐘）才送出。
+- 每件修改的「改好了」只有 workflow 的回報這一個來源，所以不會有兩個事件同時改同一筆紀錄的問題。
 - 每件大約會用掉 3～4 則 push（改好通知、上線通知）；LINE 輕用量方案每月 200 則。
 - 追加修改的判定只看「同一人有沒有未結案的件」。要提另一件不相關的修改，得等前一件上線或退回。

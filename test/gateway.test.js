@@ -18,7 +18,6 @@ const merges = (calls) => ghCalls(calls, "PUT", "/merge");
 async function readyRequest(t, { requester = STAFF } = {}) {
   await t.line([textEvent(requester, "營業時間改成週日公休")]);
   await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 90_000)));
   return (await t.env.STATE.get("req:7", "json")).round.id;
 }
 
@@ -130,26 +129,18 @@ test("非文字訊息 → 回覆只看得懂文字", async () => {
 
 // ── 改好通知 ──
 
-test("只有 workflow 回報改好、預覽還沒好 → 先不通知", async () => {
+test("workflow 回報改好（預覽已部署）→ 推給我（含按鈕）與發訊息的人", async () => {
   const t = setup();
   await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
   t.clearCalls();
   await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
-  assert.equal(pushes(t.calls).length, 0);
-});
-
-test("改好＋預覽部署完成 → 推給我（含按鈕）與發訊息的人", async () => {
-  const t = setup();
-  await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
-  t.clearCalls();
-  await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 90_000)));
 
   const [toMe] = pushes(t.calls, APPROVER);
   const [text, buttons] = toMe.body.messages;
   assert.match(text.text, /阿姨 的修改 #7 改好了/);
   assert.match(text.text, /週日公休/);
   assert.doesNotMatch(text.text, /line-request:status/);
+  assert.doesNotMatch(text.text, /PR：/);
   assert.match(text.text, /https:\/\/line-7\.my-site\.pages\.dev/);
   const labels = buttons.template.actions.map((a) => a.label);
   assert.deepEqual(labels, ["看預覽", "上線", "退回"]);
@@ -159,13 +150,23 @@ test("改好＋預覽部署完成 → 推給我（含按鈕）與發訊息的人
   assert.equal(toStaff.body.messages.length, 1); // 發訊息的人沒有按鈕
 });
 
-test("預覽先好、workflow 後回報 → 一樣會通知，而且只通知一次", async () => {
+test("預覽網址以 workflow 回報的為準", async () => {
+  const t = setup();
+  await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
+  t.clearCalls();
+  const body = readyBody(12, 7, "改好了", "https://custom.example.pages.dev");
+  await t.github("issue_comment", workflowComment(7, body, iso(T0 + 60_000)));
+  assert.match(pushes(t.calls, APPROVER)[0].body.messages[0].text, /custom\.example\.pages\.dev/);
+});
+
+test("同一則回報被重送 → 只通知一次；Cloudflare 的 check run 事件不影響", async () => {
   const t = setup();
   await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
   t.clearCalls();
   await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 50_000)));
+  assert.equal(pushes(t.calls).length, 0);
   await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 70_000))); // 重複事件
+  await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
   assert.equal(pushes(t.calls, APPROVER).length, 1);
   assert.equal(pushes(t.calls, STAFF).length, 1);
 });
@@ -175,21 +176,19 @@ test("別人假冒 workflow 的標記留言 → 不理", async () => {
   await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
   t.clearCalls();
   await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000), "someone"));
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 90_000)));
   assert.equal(pushes(t.calls).length, 0);
 });
 
-test("上一輪的舊部署事件不算這一輪", async () => {
+test("上一輪的舊回報不算這一輪", async () => {
   const t = setup();
   await readyRequest(t);
   t.setNow(T0 + 10 * 60_000);
   await t.line([textEvent(STAFF, "字再大一點")]); // 開第二輪
   t.clearCalls();
-  await t.github("issue_comment", workflowComment(7, readyBody(12, 7, "字放大了"), iso(T0 + 11 * 60_000)));
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 90_000))); // 第一輪的
+  await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000))); // 第一輪的回報重送
   assert.equal(pushes(t.calls).length, 0);
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 12 * 60_000)));
-  assert.equal(pushes(t.calls, APPROVER).length, 1);
+  await t.github("issue_comment", workflowComment(7, readyBody(12, 7, "字放大了"), iso(T0 + 11 * 60_000)));
+  assert.match(pushes(t.calls, APPROVER)[0].body.messages[0].text, /字放大了/);
 });
 
 test("workflow 反問 → 把問題推給發訊息的人", async () => {
@@ -294,7 +293,6 @@ test("我自己提的件 → 只收到一則有按鈕的通知，不重複", asy
   const t = setup();
   await t.line([textEvent(APPROVER, "營業時間改成週日公休")]);
   await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
-  await t.github("check_run", pagesCheckRun("line/7", iso(T0 + 90_000)));
   assert.equal(pushes(t.calls, APPROVER).length, 1);
 });
 
@@ -312,19 +310,44 @@ test("直接在 GitHub 合併 PR → 同步狀態並通知發訊息的人", asyn
 
 // ── 排程補送 ──
 
-test("預覽訊號一直沒來 → 排程在 4 分鐘後用推算的網址補送", async () => {
-  const t = setup();
+test("回報的 webhook 漏接 → 排程去 GitHub 讀留言，補送通知", async () => {
+  const comments7 = [];
+  const t = setup({ issueComments: { 7: comments7 } });
   await t.line([textEvent(STAFF, "營業時間改成週日公休")]);
-  await t.github("issue_comment", workflowComment(7, readyBody(12, 7), iso(T0 + 60_000)));
+  // workflow 已在 GitHub 留言回報，但這則 webhook 沒送到 Worker
+  comments7.push({ user: { login: "github-actions[bot]" }, body: readyBody(12, 7), created_at: iso(T0 + 60_000) });
   t.clearCalls();
-  t.setNow(T0 + 2 * 60_000);
+
+  t.setNow(T0 + 3 * 60_000);
   await handleScheduled(t.env, t.deps);
-  assert.equal(pushes(t.calls).length, 0); // 還沒到時間
-  t.setNow(T0 + 6 * 60_000);
+  assert.equal(pushes(t.calls).length, 0); // 還不到對帳時間
+  assert.equal(ghCalls(t.calls, "GET", "/comments").length, 0);
+
+  t.setNow(T0 + 10 * 60_000);
   await handleScheduled(t.env, t.deps);
-  assert.match(pushes(t.calls, APPROVER)[0].body.messages[0].text, /line-7\.my-site\.pages\.dev/);
+  const [toMe] = pushes(t.calls, APPROVER);
+  assert.match(toMe.body.messages[0].text, /週日公休/);
+  assert.equal(toMe.body.messages[1].template.actions[1].label, "上線");
+  assert.equal(pushes(t.calls, STAFF).length, 1);
+  const req = await t.env.STATE.get("req:7", "json");
+  assert.equal(req.pr, 12);
+  assert.equal(req.round.notified, true);
+
   await handleScheduled(t.env, t.deps);
   assert.equal(pushes(t.calls, APPROVER).length, 1); // 不重複
+});
+
+test("排程對帳時忽略上一輪的舊回報", async () => {
+  const comments7 = [];
+  const t = setup({ issueComments: { 7: comments7 } });
+  await readyRequest(t);
+  comments7.push({ user: { login: "github-actions[bot]" }, body: readyBody(12, 7), created_at: iso(T0 + 60_000) });
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "字再大一點")]); // 第二輪，workflow 還沒回報
+  t.clearCalls();
+  t.setNow(T0 + 20 * 60_000);
+  await handleScheduled(t.env, t.deps);
+  assert.equal(pushes(t.calls).length, 0);
 });
 
 // ── 小工具 ──
@@ -334,8 +357,13 @@ test("parseMarker 解析狀態、PR、分支，並去掉標記與 PR 行", () =>
   assert.equal(m.status, "ready");
   assert.equal(m.pr, "12");
   assert.equal(m.branch, "line/7");
+  assert.equal(m.preview, "https://line-7.my-site.pages.dev");
   assert.equal(m.text, "改好了");
   assert.equal(parseMarker("一般留言"), null);
+  // 舊版 workflow 的回報（沒有 preview）也看得懂
+  const old = parseMarker("<!-- line-request:status=ready;pr=3;branch=line/2 -->\n好了\n\nPR：#3（預覽網址會由 Cloudflare Pages 貼在 PR 上）");
+  assert.equal(old.pr, "3");
+  assert.equal(old.text, "好了");
 });
 
 test("previewUrlFor 依 Cloudflare 規則轉分支名", () => {

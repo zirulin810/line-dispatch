@@ -58,6 +58,8 @@ export function githubClient(env, fetchImpl = fetch) {
   return {
     createIssue: (title, body, labels) => call("POST", "/issues", { title, body, labels }),
     getIssue: (n) => call("GET", `/issues/${n}`),
+    listComments: (n, sinceIso) =>
+      call("GET", `/issues/${n}/comments?per_page=100&since=${encodeURIComponent(sinceIso)}`),
     comment: (n, body) => call("POST", `/issues/${n}/comments`, { body }),
     closeIssue: (n) => call("PATCH", `/issues/${n}`, { state: "closed", state_reason: "not_planned" }),
     mergePr: (pr, title) =>
