@@ -1,0 +1,7 @@
+# 複製成 .dev.vars 給 `npm run dev` 用（.dev.vars 已在 .gitignore，不會被提交）
+LINE_CHANNEL_SECRET=
+LINE_CHANNEL_ACCESS_TOKEN=
+APPROVER_USER_ID=
+ALLOWED_USER_IDS=
+GITHUB_TOKEN=
+GITHUB_WEBHOOK_SECRET=

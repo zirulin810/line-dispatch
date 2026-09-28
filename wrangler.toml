@@ -1,0 +1,25 @@
+name = "line-dispatch"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# 每 5 分鐘補送一次「改好了但還沒通知」的件（預覽訊號漏接時的保險）
+[triggers]
+crons = ["*/5 * * * *"]
+
+# 件的狀態（誰的件、PR 編號、這一輪進度）。id 在首次設定時用 `npx wrangler kv namespace create STATE` 產生後填入
+[[kv_namespaces]]
+binding = "STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+GITHUB_REPO = "dongguang-medical/dongguang-medical.github.io"
+PAGES_PROJECT = "dongguang-medical"
+ISSUE_LABEL = "line-request"
+
+# 以下用 `npx wrangler secret put <名稱>` 設定，不寫在這裡：
+#   LINE_CHANNEL_SECRET        LINE channel secret
+#   LINE_CHANNEL_ACCESS_TOKEN  LINE channel access token (long-lived)
+#   APPROVER_USER_ID           能按［上線］的人（我）的 LINE userId
+#   ALLOWED_USER_IDS           能提修改的人，LINE userId 以逗號分隔（我也要列進去）
+#   GITHUB_TOKEN               fine-grained PAT（Issues／Pull requests／Contents 讀寫）
+#   GITHUB_WEBHOOK_SECRET      GitHub webhook 的 secret
