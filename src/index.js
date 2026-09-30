@@ -163,7 +163,7 @@ async function handleText(ev, userId, site, text, env, deps) {
     if (!res.ok) return line.reply(ev.replyToken, [msg.failed()]);
     existing.round = newRound(now());
     await st.putRequest(existing);
-    return line.reply(ev.replyToken, [msg.followUp(existing.issue)]);
+    return line.reply(ev.replyToken, [msg.received(existing.issue)]);
   }
 
   const name = await line.displayName(userId);
@@ -183,10 +183,10 @@ async function onPostback(ev, userId, env, deps) {
   const action = params.get("a");
   if (action === "grant" || action === "ignore") return onReview(ev, userId, params, env, deps);
   if (action === "approve" || action === "reject") return onDecision(ev, userId, params, env, deps);
-  if (action === "cancel" || action === "keep") return onCancelDecision(ev, userId, params, env, deps);
+  if (action === "cancel") return onCancel(ev, userId, params, env, deps);
 }
 
-// 管理者審核新好友
+// 管理者審核新好友。按鈕反映管理者「最後一次」的決定：忽略後可以再開放，開放後也可以按忽略收回。
 async function onReview(ev, userId, params, env, deps) {
   const { line, st } = deps;
   if (!isAdmin(env, userId)) return line.reply(ev.replyToken, [msg.onlyAdmin()]);
@@ -195,16 +195,18 @@ async function onReview(ev, userId, params, env, deps) {
   if (!member) return;
 
   if (params.get("a") === "ignore") {
-    if (member.status !== "pending") return line.reply(ev.replyToken, [msg.alreadyDecided(member.name, member.status)]);
+    if (member.status === "ignored") return line.reply(ev.replyToken, [msg.alreadyIgnored(member.name)]);
+    const wasApproved = member.status === "approved";
     member.status = "ignored";
+    member.sites = [];
     await st.putMember(target, member);
-    return line.reply(ev.replyToken, [msg.ignored(member.name)]);
+    return line.reply(ev.replyToken, [wasApproved ? msg.revoked(member.name) : msg.ignored(member.name)]);
   }
 
   const site = siteById(env, params.get("s"));
   if (!site) return;
-  if (member.status === "ignored" || member.sites.includes(site.id)) {
-    return line.reply(ev.replyToken, [msg.alreadyDecided(member.name, member.status)]);
+  if (member.status === "approved" && member.sites.includes(site.id)) {
+    return line.reply(ev.replyToken, [msg.alreadyGranted(member.name, site)]);
   }
   member.status = "approved";
   member.sites = [...member.sites, site.id];
@@ -213,19 +215,33 @@ async function onReview(ev, userId, params, env, deps) {
   await line.push(target, [msg.guide(site)]);
 }
 
-// 提出者按［上線］／［退回］
-async function onDecision(ev, userId, params, env, deps) {
+// 提出者按的按鈕（上線、退回、取消）共用的檢查。
+//
+// 不看這件的「狀態」：狀態是 GitHub 那邊的事件寫進 KV 的，KV 最久要約 60 秒才會同步到
+// 處理 LINE 事件的地方，剛收到通知就按的話會讀到舊狀態。按鈕是 bot 自己發的、對方偽造不了，
+// 按鈕存在就代表當時已經是那個狀態，需要的資訊（PR 編號）也直接帶在按鈕裡。
+// 只檢查「是不是提出者」與「是不是最新一輪」：這兩項都是 LINE 這邊寫的，同一處讀寫、不會延遲。
+async function checkButton(ev, userId, params, env, deps) {
   const { line, st } = deps;
   // 改版前的按鈕沒有帶網站，視為第一個網站
   const site = siteById(env, params.get("s")) ?? defaultSite(env);
   const issue = Number(params.get("n"));
   const req = issue && (await st.getRequest(site.id, issue));
-  if (!req || req.state !== "open") return line.reply(ev.replyToken, [msg.alreadyDone(issue)]);
-  if (userId !== req.userId) return line.reply(ev.replyToken, [msg.onlyRequester()]);
-  // 之後又追加過修改的話，舊通知上的按鈕不算數（避免把改到一半的版本送上線）
-  if (params.get("r") !== req.round.id || req.round.status !== "ready" || !req.round.notified) {
-    return line.reply(ev.replyToken, [msg.staleButton(issue)]);
-  }
+  if (!req || req.state !== "open") return void (await line.reply(ev.replyToken, [msg.alreadyDone(issue)]));
+  if (userId !== req.userId) return void (await line.reply(ev.replyToken, [msg.onlyRequester()]));
+  // 之後又追加過修改（或按過［繼續修改］）的話，舊通知上的按鈕不算數
+  if (params.get("r") !== req.round.id) return void (await line.reply(ev.replyToken, [msg.staleButton(issue)]));
+  const pr = Number(params.get("pr")) || req.pr;
+  if (pr) req.pr = pr;
+  return { site, issue, req };
+}
+
+// 提出者按［上線］／［退回］
+async function onDecision(ev, userId, params, env, deps) {
+  const { line, st } = deps;
+  const checked = await checkButton(ev, userId, params, env, deps);
+  if (!checked) return;
+  const { site, issue, req } = checked;
   const gh = deps.gh(site);
 
   if (params.get("a") === "approve") {
@@ -246,43 +262,27 @@ async function onDecision(ev, userId, params, env, deps) {
     return;
   }
 
-  // 退回：關 PR、關 issue、刪分支
-  if (req.pr) await gh.closePr(req.pr);
-  await gh.closeIssue(issue);
-  await gh.deleteBranch(req.branch);
-  req.state = "closed";
-  await st.putRequest(req);
-  await st.clearOpenRequest(req.userId, site.id, issue);
+  await closeRequest(req, site, deps);
   await line.reply(ev.replyToken, [msg.rejected(req)]);
 }
 
-// 提出者確認要不要取消（Claude 判斷對方想放棄時才會出現這組按鈕）
-async function onCancelDecision(ev, userId, params, env, deps) {
-  const { line, st } = deps;
-  const site = siteById(env, params.get("s")) ?? defaultSite(env);
-  const issue = Number(params.get("n"));
-  const req = issue && (await st.getRequest(site.id, issue));
-  if (!req || req.state !== "open") return line.reply(ev.replyToken, [msg.alreadyDone(issue)]);
-  if (userId !== req.userId) return line.reply(ev.replyToken, [msg.onlyRequester()]);
-  if (params.get("r") !== req.round.id || req.round.status !== "cancel") {
-    return line.reply(ev.replyToken, [msg.staleButton(issue)]);
-  }
+// 提出者按［取消這件］
+async function onCancel(ev, userId, params, env, deps) {
+  const checked = await checkButton(ev, userId, params, env, deps);
+  if (!checked) return;
+  await closeRequest(checked.req, checked.site, deps);
+  await deps.line.reply(ev.replyToken, [msg.cancelled(checked.req)]);
+}
 
-  if (params.get("a") === "keep") {
-    req.round.status = "kept"; // 這組按鈕用過了；件照樣開著，下一則訊息接著改
-    await st.putRequest(req);
-    return line.reply(ev.replyToken, [msg.keepGoing(req)]);
-  }
-
-  // 確定取消：關 PR、關 issue、刪分支
+// 結案不上線（退回、取消共用）：關 PR、關 issue、刪分支
+async function closeRequest(req, site, deps) {
   const gh = deps.gh(site);
   if (req.pr) await gh.closePr(req.pr);
-  await gh.closeIssue(issue);
+  await gh.closeIssue(req.issue);
   await gh.deleteBranch(req.branch);
   req.state = "closed";
-  await st.putRequest(req);
-  await st.clearOpenRequest(req.userId, site.id, issue);
-  await line.reply(ev.replyToken, [msg.cancelled(req)]);
+  await deps.st.putRequest(req);
+  await deps.st.clearOpenRequest(req.userId, site.id, req.issue);
 }
 
 // ── GitHub ──────────────────────────────────────────────
@@ -369,19 +369,23 @@ async function onWorkflowReport(req, site, marker, createdAt, env, deps) {
     case "cancel":
       round.status = "cancel";
       round.notified = true;
-      await line.push(req.userId, msg.confirmCancel(req, site));
+      await line.push(req.userId, [msg.cancelOption(req, site, msg.askCancel(req, site))]);
       return;
     case "question":
     case "nochange":
       round.status = marker.status;
       round.notified = true;
-      await line.push(req.userId, [msg[marker.status](req, marker.text)]);
+      await line.push(req.userId, [msg[marker.status](req, marker.text), msg.cancelOption(req, site)]);
       return;
     default: // error
       round.status = "error";
       round.notified = true;
-      if (!isAdmin(env, req.userId)) await line.push(req.userId, [msg.errorForRequester(req)]);
-      await line.push(env.ADMIN_USER_ID, [msg.errorForAdmin(req, site, marker.text)]);
+      if (isAdmin(env, req.userId)) {
+        await line.push(req.userId, [msg.errorForAdmin(req, site, marker.text), msg.cancelOption(req, site)]);
+      } else {
+        await line.push(req.userId, [msg.errorForRequester(req), msg.cancelOption(req, site)]);
+        await line.push(env.ADMIN_USER_ID, [msg.errorForAdmin(req, site, marker.text)]);
+      }
   }
 }
 

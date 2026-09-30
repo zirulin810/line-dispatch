@@ -103,6 +103,38 @@ test("管理者按［忽略］→ 之後的訊息不理、不再通知", async (
   assert.equal(t.calls.length, 0);
 });
 
+test("按了［忽略］後再按［範例網站］→ 改成開放，對方收到使用說明", async () => {
+  const t = setup();
+  await t.line([followEvent(STRANGER)]);
+  await t.line([postbackEvent(ADMIN, `a=ignore&u=${STRANGER}`)]);
+  t.clearCalls();
+  await t.line([postbackEvent(ADMIN, `a=grant&u=${STRANGER}&s=${SITE.id}`)]);
+  assert.match(replyText(t.calls), /已開放 路人 修改範例網站/);
+  assert.equal(pushes(t.calls, STRANGER).length, 1);
+  t.clearCalls();
+  await t.line([textEvent(STRANGER, "營業時間改成週日公休")]);
+  assert.equal(createdIssues(t.calls).length, 1);
+});
+
+test("已開放的人再按［忽略］→ 收回權限；重複按同一個 → 告知目前狀態", async () => {
+  const t = setup();
+  await t.line([followEvent(STRANGER)]);
+  await t.line([postbackEvent(ADMIN, `a=grant&u=${STRANGER}&s=${SITE.id}`)]);
+  t.clearCalls();
+  await t.line([postbackEvent(ADMIN, `a=grant&u=${STRANGER}&s=${SITE.id}`)]);
+  assert.match(replyText(t.calls), /已經可以修改範例網站/);
+  assert.equal(pushes(t.calls).length, 0); // 不重複傳使用說明
+  t.clearCalls();
+  await t.line([postbackEvent(ADMIN, `a=ignore&u=${STRANGER}`)]);
+  assert.match(replyText(t.calls), /已收回 路人 的權限/);
+  t.clearCalls();
+  await t.line([postbackEvent(ADMIN, `a=ignore&u=${STRANGER}`)]);
+  assert.match(replyText(t.calls), /目前已經是忽略狀態/);
+  t.clearCalls();
+  await t.line([textEvent(STRANGER, "幫我改首頁")]);
+  assert.equal(t.calls.length, 0);
+});
+
 test("不是管理者按審核按鈕 → 拒絕", async () => {
   const t = setup();
   await t.line([followEvent(STRANGER)]);
@@ -150,7 +182,7 @@ test("還有未結案的件時再傳 → 留言到同一個 issue，不開新件
   await t.line([textEvent(STAFF, "字再大一點")]);
   assert.equal(createdIssues(t.calls).length, 0);
   assert.match(comments(t.calls)[0].url, /\/issues\/7\/comments$/);
-  assert.match(replyText(t.calls), /接著改 #7/);
+  assert.match(replyText(t.calls), /收到，處理中（#7）/);
 });
 
 test("舊件已在 GitHub 上關掉或刪掉 → 新訊息開新件", async () => {
@@ -339,23 +371,23 @@ async function cancelRequested(t) {
   return (await t.env.STATE.get(`req:${SITE.id}:7`, "json")).round.id;
 }
 
-test("Claude 判斷要取消 → 推給提出者［確定取消］［繼續修改］，還沒結案", async () => {
+test("提出者說不做了 → 直接跳「要取消嗎」＋［取消這件］，還沒結案", async () => {
   const t = setup();
   await readyRequest(t);
   t.setNow(T0 + 10 * 60_000);
   await t.line([textEvent(STAFF, "算了，不用改了")]);
   t.clearCalls();
   await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
-  const [p] = pushes(t.calls, STAFF);
-  const tpl = p.body.messages[0].template;
-  assert.match(tpl.text, /要取消範例網站 #7 嗎/);
-  assert.deepEqual(tpl.actions.map((a) => a.label), ["確定取消", "繼續修改"]);
+  const msgs = pushes(t.calls, STAFF)[0].body.messages;
+  assert.equal(msgs.length, 1); // 不說明原因，直接問
+  assert.match(msgs[0].template.text, /要取消範例網站 #7 嗎？要繼續的話直接回覆我/);
+  assert.deepEqual(msgs[0].template.actions.map((a) => a.label), ["取消這件"]);
   assert.equal((await t.env.STATE.get(`req:${SITE.id}:7`, "json")).state, "open");
   assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
   assert.equal(pushes(t.calls, ADMIN).length, 0);
 });
 
-test("按［確定取消］→ 關 PR、issue、刪分支，回「已取消」；之後的新訊息開新件", async () => {
+test("按［取消這件］→ 關 PR、issue、刪分支，回「已取消」；之後的新訊息開新件", async () => {
   const t = setup();
   const round = await cancelRequested(t);
   t.clearCalls();
@@ -371,20 +403,17 @@ test("按［確定取消］→ 關 PR、issue、刪分支，回「已取消」�
   assert.equal(comments(t.calls).length, 0);
 });
 
-test("按［繼續修改］→ 件保持開著，下一則訊息接著改；取消按鈕不能再用", async () => {
+test("說不做了之後又直接回覆 → 接著改同一件，那顆［取消這件］失效", async () => {
   const t = setup();
   const round = await cancelRequested(t);
+  t.setNow(T0 + 12 * 60_000);
   t.clearCalls();
-  await t.line([postbackEvent(STAFF, `a=keep&s=${SITE.id}&n=7&r=${round}`)]);
-  assert.match(replyText(t.calls), /繼續進行/);
-  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+  await t.line([textEvent(STAFF, "還是改好了，字改成紅色")]);
+  assert.match(comments(t.calls)[0].url, /\/issues\/7\/comments$/);
   t.clearCalls();
   await t.line([postbackEvent(STAFF, `a=cancel&s=${SITE.id}&n=7&r=${round}`)]);
   assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
   assert.match(replyText(t.calls), /比較舊/);
-  t.clearCalls();
-  await t.line([textEvent(STAFF, "字改成紅色")]);
-  assert.match(comments(t.calls)[0].url, /\/issues\/7\/comments$/);
 });
 
 test("取消確認按鈕：只有提出者按得動；之前那輪的［上線］也失效", async () => {
@@ -419,6 +448,92 @@ test("反問之後說算了 → 一樣能確認取消並結案", async () => {
   assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed");
   assert.equal(ghCalls(t.calls, "PATCH", "/pulls/").length, 0); // 還沒有 PR
   assert.equal(await t.env.STATE.get(`open:${STAFF}`), null);
+});
+
+test("反問、沒有要改的、失敗的通知都附［取消這件］，按下直接結案", async () => {
+  const cases = [
+    ["question", "<!-- line-request:status=question -->\n這需要處理圖片，目前沒辦法。"],
+    ["nochange", "<!-- line-request:status=nochange -->\n看起來已經是這樣了。"],
+    ["error", "<!-- line-request:status=error -->\n沒有完成"],
+  ];
+  for (const [status, body] of cases) {
+    const t = setup();
+    await t.approve(STAFF);
+    await t.line([textEvent(STAFF, "把網頁 icon 放大")]);
+    t.clearCalls();
+    await t.github("issue_comment", workflowComment(7, body, iso(T0 + 60_000)));
+    const msgs = pushes(t.calls, STAFF)[0].body.messages;
+    const btn = msgs.at(-1).template.actions[0];
+    assert.equal(btn.label, "取消這件", status);
+    t.clearCalls();
+    await t.line([postbackEvent(STAFF, btn.data)]);
+    assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed", status);
+    assert.match(replyText(t.calls), /#7 已取消/, status);
+    assert.equal(await t.env.STATE.get(`open:${STAFF}`), null, status);
+  }
+});
+
+test("反問後對方接著回覆 → 那顆［取消這件］就失效", async () => {
+  const t = setup();
+  await t.approve(STAFF);
+  await t.line([textEvent(STAFF, "那個字改大一點")]);
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=question -->\n哪一頁？", iso(T0 + 60_000)));
+  const btn = pushes(t.calls, STAFF)[0].body.messages.at(-1).template.actions[0];
+  t.setNow(T0 + 5 * 60_000);
+  await t.line([textEvent(STAFF, "首頁")]);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, btn.data)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+  assert.match(replyText(t.calls), /比較舊/);
+});
+
+test("［取消這件］只有提出者按得動", async () => {
+  const t = setup();
+  await t.approve(STAFF);
+  await t.line([textEvent(STAFF, "把網頁 icon 放大")]);
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=question -->\n沒辦法", iso(T0 + 60_000)));
+  const btn = pushes(t.calls, STAFF)[0].body.messages.at(-1).template.actions[0];
+  t.clearCalls();
+  await t.line([postbackEvent(ADMIN, btn.data)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+});
+
+// ── KV 同步延遲 ──
+
+// 模擬「GitHub 那邊剛寫進去、LINE 這邊還讀到舊資料」：把這件的狀態蓋回收到回報之前的樣子
+async function makeStale(t, issue = 7) {
+  const key = `req:${SITE.id}:${issue}`;
+  const req = await t.env.STATE.get(key, "json");
+  req.pr = null;
+  req.round = { ...req.round, status: "working", notified: false, summary: null, previewUrl: null };
+  await t.env.STATE.put(key, JSON.stringify(req));
+}
+
+test("剛收到「改好了」就按［上線］（讀到還沒同步的舊狀態）→ 照樣合併，PR 編號取自按鈕", async () => {
+  const t = setup();
+  await readyRequest(t);
+  const btn = pushes(t.calls, STAFF)[0].body.messages[1].template.actions[1];
+  assert.match(btn.data, /pr=12/);
+  await makeStale(t);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, btn.data)]);
+  assert.equal(merges(t.calls)[0].url, `https://api.github.com/repos/${REPO}/pulls/12/merge`);
+  assert.match(pushes(t.calls, ADMIN)[0].body.messages[0].text, /pull\/12\/files/);
+});
+
+test("剛收到「要取消嗎」就按［取消這件］（讀到舊狀態）→ 照樣取消，並關掉按鈕帶的 PR", async () => {
+  const t = setup();
+  await readyRequest(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "算了")]);
+  t.clearCalls();
+  await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
+  const btn = pushes(t.calls, STAFF)[0].body.messages[0].template.actions[0];
+  await makeStale(t);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, btn.data)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/pulls/12")[0].body.state, "closed");
+  assert.match(replyText(t.calls), /#7 已取消/);
 });
 
 test("parseMarker 看得懂取消回報", () => {

@@ -11,13 +11,12 @@ const postback = (label, data, displayText) => ({ type: "postback", label, data,
 export const msg = {
   // ── 提修改 ──
   received: (issue) => text(`收到，處理中（#${issue}）。改好會再通知你，通常幾分鐘內。`),
-  followUp: (issue) => text(`收到，接著改 #${issue}。`),
   textOnly: () => text("目前只看得懂文字訊息，請用文字描述要改哪裡。"),
   failed: () => text("抱歉，系統暫時出了點問題，請稍後再傳一次。"),
 
   // 改好了：只給提出者，由他決定上線或退回
   readyForRequester: (req, site) => {
-    const data = (a) => `a=${a}&s=${site.id}&n=${req.issue}&r=${req.round.id}`;
+    const data = (a) => `a=${a}&s=${site.id}&n=${req.issue}&r=${req.round.id}&pr=${req.pr ?? ""}`;
     return [
       text(
         `${site.name} #${req.issue} 改好了，可以先看看預覽：\n${req.round.previewUrl}\n\n${req.round.summary}\n\n` +
@@ -31,18 +30,16 @@ export const msg = {
     ];
   },
 
-  // Claude 判斷對方要放棄這件：先確認
-  confirmCancel: (req, site) => {
-    const data = (a) => `a=${a}&s=${site.id}&n=${req.issue}&r=${req.round.id}`;
-    return [
-      buttons(`要取消 #${req.issue} 嗎？`, `要取消${site.name} #${req.issue} 嗎？`, [
-        postback("確定取消", data("cancel"), `確定取消 #${req.issue}`),
-        postback("繼續修改", data("keep"), "繼續修改"),
-      ]),
-    ];
-  },
+  // 取消只有這一種按鈕：
+  //   ・提出者說不做了 → 直接跳這個（prompt 用預設的「要取消嗎」）
+  //   ・做不到（反問、沒有要改的、失敗）→ 先說明原因，後面附這個
+  // 按下就結案；要繼續就直接回覆，新訊息會開新一輪，這顆按鈕自動失效
+  cancelOption: (req, site, prompt = "不想繼續這件的話可以直接取消；要繼續就直接回覆我。") =>
+    buttons(`要取消 #${req.issue} 嗎？`, prompt, [
+      postback("取消這件", `a=cancel&s=${site.id}&n=${req.issue}&r=${req.round.id}&pr=${req.pr ?? ""}`, `取消 #${req.issue}`),
+    ]),
+  askCancel: (req, site) => `要取消${site.name} #${req.issue} 嗎？要繼續的話直接回覆我就好。`,
   cancelled: (req) => text(`#${req.issue} 已取消。之後有要改的，直接傳訊息就好。`),
-  keepGoing: (req) => text(`好的，#${req.issue} 繼續進行，可以繼續告訴我要改什麼。`),
 
   // workflow 需要反問、沒有要改的、失敗
   question: (req, body) => text(`關於 #${req.issue}：\n\n${body}`),
@@ -75,8 +72,9 @@ export const msg = {
   ],
   granted: (name, site) => text(`已開放 ${name ?? "對方"} 修改${site.name}。`),
   ignored: (name) => text(`已忽略 ${name ?? "對方"}，之後他傳的訊息都不會處理。`),
-  alreadyDecided: (name, status) =>
-    text(`${name ?? "對方"} 已經${status === "ignored" ? "被忽略" : "開放"}過了。`),
+  revoked: (name) => text(`已收回 ${name ?? "對方"} 的權限，之後他傳的訊息都不會處理。`),
+  alreadyIgnored: (name) => text(`${name ?? "對方"} 目前已經是忽略狀態。`),
+  alreadyGranted: (name, site) => text(`${name ?? "對方"} 已經可以修改${site.name}了。`),
   onlyAdmin: () => text("只有管理員可以按這個按鈕。"),
   guide: (site) =>
     text(

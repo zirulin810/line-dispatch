@@ -33,9 +33,10 @@ export function newRequest({ site, issue, userId, name, now }) {
 
 export function newRound(now) {
   return {
-    id: String(now), // 放進［上線］按鈕，舊輪的按鈕按了不算數
+    // 放進按鈕，舊輪的按鈕按了不算數（只在 LINE 這邊改，讀寫不會延遲）；加亂數避免同一毫秒撞號
+    id: `${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     startedAt: now,
-    status: "working", // working | ready | question | nochange | error | cancel（等對方確認取消）| kept（對方選繼續）
+    status: "working", // working | ready | question | nochange | error | cancel（對方說不做了，等他按取消）
     readyAt: null,
     summary: null,
     previewUrl: null,
