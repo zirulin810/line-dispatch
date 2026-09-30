@@ -2,24 +2,27 @@ name = "line-dispatch"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
-# 每 5 分鐘補送一次「改好了但還沒通知」的件（預覽訊號漏接時的保險）
+# 每 5 分鐘對帳一次：webhook 漏接時，以 GitHub 上的回報補做通知
 [triggers]
 crons = ["*/5 * * * *"]
 
-# 件的狀態（誰的件、PR 編號、這一輪進度）。id 在首次設定時用 `npx wrangler kv namespace create STATE` 產生後填入
+# 成員審核狀態與件的狀態（誰的件、PR 編號、這一輪進度）。id 在首次設定時用 `npx wrangler kv namespace create STATE` 產生後填入
 [[kv_namespaces]]
 binding = "STATE"
 id = "4fe0513c1fa24804b3a22c3844ceac05"
 
 [vars]
-GITHUB_REPO = "dongguang-medical/dongguang-medical.github.io"
-PAGES_PROJECT = "dongguang-medical"
 ISSUE_LABEL = "line-request"
+
+# 網站設定表：要開放新網站時在這裡加一筆（說明見 src/sites.js），
+# 並在該網站的 repo 裝上 line-request workflow 與 CLAUDE.md 守則。
+SITES = [
+  { id = "dongguang", name = "東光網站", repo = "dongguang-medical/dongguang-medical.github.io", pagesProject = "dongguang-medical" },
+]
 
 # 以下用 `npx wrangler secret put <名稱>` 設定，不寫在這裡：
 #   LINE_CHANNEL_SECRET        LINE channel secret
 #   LINE_CHANNEL_ACCESS_TOKEN  LINE channel access token (long-lived)
-#   APPROVER_USER_ID           能按［上線］的人（我）的 LINE userId
-#   ALLOWED_USER_IDS           能提修改的人，LINE userId 以逗號分隔（我也要列進去）
-#   GITHUB_TOKEN               fine-grained PAT（Issues／Pull requests／Contents 讀寫）
-#   GITHUB_WEBHOOK_SECRET      GitHub webhook 的 secret
+#   ADMIN_USER_ID              管理者（我）的 LINE userId：審核新好友、收上線與失敗通知
+#   GITHUB_TOKEN               fine-grained PAT（各網站 repo 的 Issues／Pull requests／Contents 讀寫）
+#   GITHUB_WEBHOOK_SECRET      GitHub webhook 的 secret（各網站 repo 共用同一組）

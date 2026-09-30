@@ -1,30 +1,34 @@
 # LINE 派工閘道（line-dispatch）
 
-店裡的人在 LINE 傳「要改網站哪裡」→ 這個 Cloudflare Worker 開成 GitHub issue → 範例網站 repo 的
-`line-request` workflow 讓 Claude 改好、開 PR → Cloudflare Pages 出預覽 → Worker 把預覽推到 LINE →
-網站負責人按［上線］才合併。
+用 LINE 私訊 bot 說「要改網站哪裡」→ 這個 Cloudflare Worker 開成 GitHub issue → 網站 repo 的
+`line-request` workflow 讓 Claude 改好、開 PR → Cloudflare Pages 出預覽 → Worker 把預覽推給提出的人 →
+他按［上線］才合併。誰能用由管理者在 LINE 上按鈕審核。
 
 ```
-LINE ──訊息──▶ /line/webhook ──開 issue／留言──▶ GitHub（my-site.github.io）
-                                                   │ workflow：Claude 改 → 推 line/<issue> → 開 PR
-                                                   │ Cloudflare Pages：部署分支預覽
-GitHub ──事件──▶ /github/webhook ──改好了＋預覽連結──▶ LINE（發訊息的人、負責人）
-負責人按［上線］／［退回］──▶ /line/webhook ──合併／關閉 PR──▶ GitHub
+LINE（私訊）──訊息──▶ /line/webhook ──開 issue／留言──▶ GitHub（網站 repo）
+                                                          │ workflow：Claude 改 → 推 line/<issue> → 開 PR
+                                                          │ → 等 Cloudflare Pages 預覽部署好 → 在 issue 回報
+GitHub ──事件──▶ /github/webhook ──改好了＋預覽連結──▶ LINE（提出者）
+提出者按［上線］／［退回］──▶ /line/webhook ──合併／關閉 PR──▶ GitHub；上線時通知管理者
 ```
 
 ## 行為
 
 | 情況 | Worker 做什麼 |
 | --- | --- |
-| 白名單的人傳文字 | 開帶 `line-request` 標籤的 issue，回「收到，處理中（#編號）」 |
+| 沒審核過的人加好友，或已是好友者第一次傳訊息 | 私訊管理者「新好友：名字」＋［各網站］［忽略］按鈕；回對方「已通知管理員」。同一人只通知一次 |
+| 管理者按某個網站 | 開放那個網站給對方，並傳使用說明給他 |
+| 管理者按［忽略］ | 之後對方傳什麼都不理 |
+| 開放過的人（或管理者）私訊文字 | 開帶 `line-request` 標籤的 issue，回「收到，處理中（#編號）」 |
 | 同一人還有未結案的件 | 改成留言到那個 issue（追加修改），回「收到，接著改」 |
-| 非白名單的人傳訊息 | 不理，只在紀錄裡留下 userId |
-| workflow 回報改好（它會等 Pages 預覽部署好才回報） | 推給負責人（摘要＋預覽＋［看預覽］［上線］［退回］），也推給發訊息的人（摘要＋預覽） |
-| workflow 反問／沒有要改的／失敗 | 把內容推給發訊息的人；失敗時也通知負責人 |
-| 負責人按［上線］ | squash 合併 PR、刪分支，通知雙方；issue 由 PR 的 `Closes #` 自動關閉 |
-| 負責人按［退回］ | 關 PR、關 issue、刪分支，通知發訊息的人 |
-| 其他人按按鈕、或按到舊一輪的按鈕 | 拒絕，不合併 |
-| 在 GitHub 上直接合併／關閉 | 同步狀態；合併時通知發訊息的人 |
+| 被拉進群組或多人聊天室 | 自動退出（群組推播按人數計額度） |
+| workflow 回報改好（它會等 Pages 預覽部署好才回報） | 推給提出者：摘要＋預覽＋［看預覽］［上線］［退回］ |
+| workflow 反問／沒有要改的 | 推給提出者 |
+| workflow 失敗 | 推給提出者與管理者 |
+| 提出者按［上線］ | squash 合併 PR、刪分支；回提出者「已上線」，私訊管理者「`<網站> <用戶> 上線`／`上線內容：<PR 變更連結>`」 |
+| 提出者按［退回］ | 關 PR、關 issue、刪分支 |
+| 別人按［上線］／［退回］、或按到舊一輪的按鈕 | 拒絕，不合併（管理者也不能替別人按） |
+| 在 GitHub 上直接合併／關閉／刪除 | 同步狀態；合併時通知提出者 |
 
 GitHub 的 webhook 偶爾會漏送：一輪開始超過 5 分鐘還沒收到 workflow 的回報，每 5 分鐘一次的排程
 會直接去 GitHub 讀 issue 留言，照回報補做。
@@ -36,10 +40,11 @@ GitHub 的 webhook 偶爾會漏送：一輪開始超過 5 分鐘還沒收到 wor
 | `src/index.js` | 路由、LINE 與 GitHub 事件處理、排程 |
 | `src/crypto.js` | LINE／GitHub 簽章驗證 |
 | `src/clients.js` | LINE Messaging API、GitHub REST API 的呼叫 |
-| `src/store.js` | KV 裡的件狀態 |
+| `src/store.js` | KV 裡的成員審核狀態與件狀態 |
+| `src/sites.js` | 網站設定表的讀取、預覽網址計算 |
 | `src/messages.js` | 所有送到 LINE 的文字（改口吻只改這份） |
 | `test/` | 自動測試（`npm test`） |
-| `wrangler.toml` | Worker 設定；憑證不在這裡，一律用 `wrangler secret` |
+| `wrangler.toml` | Worker 設定與網站設定表（`SITES`）；憑證不在這裡，一律用 `wrangler secret` |
 
 ## 部署
 
@@ -78,8 +83,7 @@ npx wrangler kv namespace create STATE
 ```powershell
 npx wrangler secret put LINE_CHANNEL_SECRET         # LINE Developers → channel → Basic settings
 npx wrangler secret put LINE_CHANNEL_ACCESS_TOKEN   # LINE Developers → channel → Messaging API（long-lived）
-npx wrangler secret put APPROVER_USER_ID            # 你自己的 userId（Basic settings 最下方 Your user ID）
-npx wrangler secret put ALLOWED_USER_IDS            # 能提修改的人，逗號分隔；先只填你自己
+npx wrangler secret put ADMIN_USER_ID               # 你自己的 userId（Basic settings 最下方 Your user ID）
 npx wrangler secret put GITHUB_TOKEN                # 第 3 步的 token
 npx wrangler secret put GITHUB_WEBHOOK_SECRET       # 自己產生一串亂數，第 7 步也要填同一串
 ```
@@ -111,17 +115,40 @@ npx wrangler deploy
 - **Secret**：第 4 步的 `GITHUB_WEBHOOK_SECRET`
 - **Which events**：Let me select individual events → 勾 **Issue comments**、**Issues**、**Pull requests**（其他取消勾選）
 
-### 8. 加入店裡的人
+### 8. 開放給別人用
 
-1. 請對方加 bot 為好友。
-2. 你這邊執行 `npm run tail`（即時看 Worker 紀錄），會出現 `[加好友] userId=U…`；
-   對方若已經是好友，請他隨便傳一句，會出現 `[未授權，略過] userId=U…`。
-3. 把那個 userId 加進白名單：`npx wrangler secret put ALLOWED_USER_IDS`，填入「你的 userId,對方的 userId」。
+請對方加 bot 為好友，你會在 LINE 收到「新好友：名字」和網站按鈕，按下要開放的網站就好。
+對方會自動收到使用說明。不認識的人就按［忽略］。
+
+### 9. 加新網站
+
+1. 在 `wrangler.toml` 的 `SITES` 加一筆（`id`、`name`、`repo`、`pagesProject`），`npx wrangler deploy`。
+2. 新網站的 repo：裝上 `line-request` workflow 與 `CLAUDE.md` 守則、設 `CLAUDE_CODE_OAUTH_TOKEN`、建 `line-request` 標籤、接 Cloudflare Pages。
+3. 新網站的 repo 加 webhook（同第 7 步，secret 用同一組），GitHub token 也要加上這個 repo 的權限。
+4. 同一個人被開放多個網站時的選擇介面還沒做，目前一律改他第一個開放的網站。
+
+## 從舊版（白名單）升級
+
+新版只認 `ADMIN_USER_ID`，**要先設好再部署**：
+
+```powershell
+npx wrangler secret put ADMIN_USER_ID          # 貼上你的 userId
+npm test
+npx wrangler deploy
+```
+
+改版前開的件與已發出的按鈕都能繼續用。原本白名單上的人要重新審核一次：他們下次傳訊息時你會收到通知。
+確認新版正常後刪掉舊的 secret：
+
+```powershell
+npx wrangler secret delete APPROVER_USER_ID
+npx wrangler secret delete ALLOWED_USER_IDS
+```
 
 ## 開發
 
 ```powershell
-npm test          # 自動測試：簽章、白名單、批准權限、通知時機、排程補送…
+npm test          # 自動測試：簽章、好友審核、上線權限、舊資料相容、排程補送…
 npm run dev       # 本機跑 Worker（需先把 .dev.vars.example 複製成 .dev.vars 並填值）
 npm run tail      # 看線上 Worker 的即時紀錄
 ```
@@ -129,5 +156,5 @@ npm run tail      # 看線上 Worker 的即時紀錄
 ## 已知限制
 
 - 每件修改的「改好了」只有 workflow 的回報這一個來源，所以不會有兩個事件同時改同一筆紀錄的問題。
-- 每件大約會用掉 3～4 則 push（改好通知、上線通知）；LINE 輕用量方案每月 200 則。
+- 每件大約用掉 2 則 push（給提出者的改好通知、給管理者的上線通知）；每位新好友審核用 1 則。LINE 輕用量方案每月 200 則。
 - 追加修改的判定只看「同一人有沒有未結案的件」。要提另一件不相關的修改，得等前一件上線或退回。

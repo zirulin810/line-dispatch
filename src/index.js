@@ -1,17 +1,19 @@
 // LINE 派工閘道
 //
-//   LINE  ──訊息──▶  /line/webhook   ──開 issue／留言──▶  GitHub（網站 repo）
-//   GitHub ──事件──▶  /github/webhook ──改好了＋預覽──▶     LINE（發訊息的人、我）
+//   LINE（私訊）──訊息──▶ /line/webhook   ──開 issue／留言──▶ GitHub（網站 repo）
+//   GitHub      ──事件──▶ /github/webhook ──改好了＋預覽──▶     LINE（提出者）
+//   提出者按［上線］／［退回］──▶ 合併／關閉 PR；上線時通知管理者
 //
+// 誰能用：不在名單上的人加好友（或第一次傳訊息）時通知管理者，由管理者按鈕開放網站或忽略。
+// 只用私訊：被拉進群組或多人聊天室就自己退出。
 // 「改好了」只有一個來源：workflow 等 Cloudflare 預覽部署好之後，在 issue 留的那則回報。
-// Worker 收到就直接通知，不需要再等其他訊號。
-//   我在 LINE 按［上線］／［退回］ ──▶ 合併／關閉 PR
 //
 // 流程細節與部署步驟見 README.md。
 
 import { verifyGithubSignature, verifyLineSignature } from "./crypto.js";
 import { githubClient, lineClient } from "./clients.js";
-import { newRequest, newRound, store } from "./store.js";
+import { newMember, newRequest, newRound, store } from "./store.js";
+import { defaultSite, previewUrlFor, siteById, siteByRepo, sites } from "./sites.js";
 import { msg } from "./messages.js";
 
 // GitHub 與 Cloudflare 的時鐘可能差一點，比對「這一輪之後才發生」時放寬 30 秒
@@ -32,8 +34,8 @@ export default {
 export function makeDeps(env, fetchImpl = fetch, now = () => Date.now()) {
   return {
     line: lineClient(env, fetchImpl),
-    gh: githubClient(env, fetchImpl),
-    st: store(env.STATE),
+    gh: (site) => githubClient(env, fetchImpl, site.repo),
+    st: store(env.STATE, defaultSite(env)?.id),
     now,
   };
 }
@@ -74,32 +76,24 @@ export async function handleFetch(request, env, deps, ctx) {
 
 // ── LINE ────────────────────────────────────────────────
 
-const allowedUsers = (env) =>
-  new Set((env.ALLOWED_USER_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+const isAdmin = (env, userId) => Boolean(userId) && userId === env.ADMIN_USER_ID;
 
 export async function handleLineEvents(events, env, deps) {
   for (const ev of events) {
     // LINE 重送的事件已經處理過，略過以免重複開件
     if (ev.deliveryContext?.isRedelivery) continue;
-    const userId = ev.source?.userId;
-    if (!userId) continue;
+    const source = ev.source ?? {};
     try {
-      if (ev.type === "follow") {
-        // 有人加好友：記下 userId，方便加進白名單（`npm run tail` 看得到）
-        console.log(`[加好友] userId=${userId}`);
-      } else if (ev.type === "message") {
-        if (!allowedUsers(env).has(userId)) {
-          console.log(`[未授權，略過] userId=${userId}`);
-          continue;
-        }
-        if (ev.message?.type !== "text") {
-          await deps.line.reply(ev.replyToken, [msg.textOnly()]);
-          continue;
-        }
-        await handleText(ev, userId, env, deps);
-      } else if (ev.type === "postback") {
-        await handlePostback(ev, userId, env, deps);
+      // 只用私訊：群組推播按人數計額度，被拉進去就退出
+      if (source.type === "group" || source.type === "room") {
+        await deps.line.leave(source);
+        continue;
       }
+      const userId = source.userId;
+      if (!userId) continue;
+      if (ev.type === "follow") await onFollow(ev, userId, env, deps);
+      else if (ev.type === "message") await onMessage(ev, userId, env, deps);
+      else if (ev.type === "postback") await onPostback(ev, userId, env, deps);
     } catch (err) {
       console.error(`處理 LINE 事件失敗：${err?.stack ?? err}`);
       if (ev.replyToken) await deps.line.reply(ev.replyToken, [msg.failed()]);
@@ -107,26 +101,65 @@ export async function handleLineEvents(events, env, deps) {
   }
 }
 
-async function handleText(ev, userId, env, deps) {
-  const { line, gh, st, now } = deps;
+// 管理者可以改所有網站；其他人看審核結果
+async function memberOf(env, deps, userId) {
+  if (isAdmin(env, userId)) return { status: "approved", sites: sites(env).map((s) => s.id), name: null };
+  return deps.st.getMember(userId);
+}
+
+async function onFollow(ev, userId, env, deps) {
+  const member = await memberOf(env, deps, userId);
+  if (member?.status === "approved") {
+    const site = siteById(env, member.sites[0]) ?? defaultSite(env);
+    return deps.line.reply(ev.replyToken, [msg.guide(site)]);
+  }
+  if (member?.status === "ignored") return;
+  if (!member) await askAdmin(userId, env, deps);
+  return deps.line.reply(ev.replyToken, [msg.waitingApproval()]);
+}
+
+async function onMessage(ev, userId, env, deps) {
+  const member = await memberOf(env, deps, userId);
+  if (member?.status === "ignored") return;
+  if (member?.status !== "approved") {
+    if (!member) await askAdmin(userId, env, deps); // 已經是好友、但沒被審核過的人：第一次傳訊息時才通知
+    return deps.line.reply(ev.replyToken, [msg.waitingApproval()]);
+  }
+  if (ev.message?.type !== "text") return deps.line.reply(ev.replyToken, [msg.textOnly()]);
   const text = ev.message.text.trim();
   if (!text) return;
+  // 綁定多個網站時選網站：之後的任務再做，目前用第一個開放的網站
+  const site = siteById(env, member.sites[0]) ?? defaultSite(env);
+  await handleText(ev, userId, site, text, env, deps);
+}
+
+// 通知管理者審核（同一人只通知一次：之後 member 已存在）
+async function askAdmin(userId, env, deps) {
+  const name = await deps.line.displayName(userId);
+  await deps.st.putMember(userId, newMember({ name, now: deps.now() }));
+  await deps.line.push(env.ADMIN_USER_ID, msg.approvalRequest(userId, name, sites(env)));
+}
+
+async function handleText(ev, userId, site, text, env, deps) {
+  const { line, st, now } = deps;
+  const gh = deps.gh(site);
 
   // 這個人還有未結案的件 → 視為追加修改，留言到同一個 issue
-  const openIssue = await st.openIssueOf(userId);
-  const existing = openIssue ? await st.getRequest(openIssue) : null;
-  // 先向 GitHub 確認那件還開著：有人直接在 GitHub 上關掉、或關閉事件漏接時，就當作結案、改開新件
+  const open = await st.openRequestOf(userId);
+  const openSite = open && siteById(env, open.site);
+  let existing = openSite ? await st.getRequest(open.site, open.issue) : null;
+  // 先向 GitHub 確認那件還開著：有人直接在 GitHub 上關掉／刪掉、或關閉事件漏接時，就當作結案、改開新件
   if (existing?.state === "open") {
-    const live = await gh.getIssue(existing.issue);
-    // 已關閉，或整個 issue 被刪掉（404／410）都當作結案
+    const live = await deps.gh(openSite).getIssue(existing.issue);
     if ((live.ok && live.data?.state === "closed") || live.status === 404 || live.status === 410) {
       existing.state = "closed";
       await st.putRequest(existing);
-      await st.clearOpenIssue(userId, existing.issue);
+      await st.clearOpenRequest(userId, existing.site, existing.issue);
+      existing = null;
     }
   }
   if (existing?.state === "open") {
-    const res = await gh.comment(existing.issue, `${text}\n\n— ${existing.name ?? "LINE"}（LINE 追加）`);
+    const res = await deps.gh(openSite).comment(existing.issue, `${text}\n\n— ${existing.name ?? "LINE"}（LINE 追加）`);
     if (!res.ok) return line.reply(ev.replyToken, [msg.failed()]);
     existing.round = newRound(now());
     await st.putRequest(existing);
@@ -140,38 +173,75 @@ async function handleText(ev, userId, env, deps) {
   if (!res.ok) return line.reply(ev.replyToken, [msg.failed()]);
 
   const issue = res.data.number;
-  await st.putRequest(newRequest({ issue, userId, name, now: now() }));
-  await st.setOpenIssue(userId, issue);
+  await st.putRequest(newRequest({ site: site.id, issue, userId, name, now: now() }));
+  await st.setOpenRequest(userId, site.id, issue);
   return line.reply(ev.replyToken, [msg.received(issue)]);
 }
 
-async function handlePostback(ev, userId, env, deps) {
-  const { line, gh, st } = deps;
+async function onPostback(ev, userId, env, deps) {
   const params = new URLSearchParams(ev.postback?.data ?? "");
   const action = params.get("a");
+  if (action === "grant" || action === "ignore") return onReview(ev, userId, params, env, deps);
+  if (action === "approve" || action === "reject") return onDecision(ev, userId, params, env, deps);
+}
+
+// 管理者審核新好友
+async function onReview(ev, userId, params, env, deps) {
+  const { line, st } = deps;
+  if (!isAdmin(env, userId)) return line.reply(ev.replyToken, [msg.onlyAdmin()]);
+  const target = params.get("u");
+  const member = target && (await st.getMember(target));
+  if (!member) return;
+
+  if (params.get("a") === "ignore") {
+    if (member.status !== "pending") return line.reply(ev.replyToken, [msg.alreadyDecided(member.name, member.status)]);
+    member.status = "ignored";
+    await st.putMember(target, member);
+    return line.reply(ev.replyToken, [msg.ignored(member.name)]);
+  }
+
+  const site = siteById(env, params.get("s"));
+  if (!site) return;
+  if (member.status === "ignored" || member.sites.includes(site.id)) {
+    return line.reply(ev.replyToken, [msg.alreadyDecided(member.name, member.status)]);
+  }
+  member.status = "approved";
+  member.sites = [...member.sites, site.id];
+  await st.putMember(target, member);
+  await line.reply(ev.replyToken, [msg.granted(member.name, site)]);
+  await line.push(target, [msg.guide(site)]);
+}
+
+// 提出者按［上線］／［退回］
+async function onDecision(ev, userId, params, env, deps) {
+  const { line, st } = deps;
+  // 改版前的按鈕沒有帶網站，視為第一個網站
+  const site = siteById(env, params.get("s")) ?? defaultSite(env);
   const issue = Number(params.get("n"));
-  if (!["approve", "reject"].includes(action) || !issue) return;
-
-  // 批准權：只有我
-  if (userId !== env.APPROVER_USER_ID) return line.reply(ev.replyToken, [msg.onlyApprover()]);
-
-  const req = await st.getRequest(issue);
+  const req = issue && (await st.getRequest(site.id, issue));
   if (!req || req.state !== "open") return line.reply(ev.replyToken, [msg.alreadyDone(issue)]);
+  if (userId !== req.userId) return line.reply(ev.replyToken, [msg.onlyRequester()]);
   // 之後又追加過修改的話，舊通知上的按鈕不算數（避免把改到一半的版本送上線）
   if (params.get("r") !== req.round.id || req.round.status !== "ready" || !req.round.notified) {
     return line.reply(ev.replyToken, [msg.staleButton(issue)]);
   }
+  const gh = deps.gh(site);
 
-  if (action === "approve") {
-    if (!req.pr) return line.reply(ev.replyToken, [msg.mergeFailed(issue)]);
-    const res = await gh.mergePr(req.pr, `LINE 修改 #${issue}`);
-    if (!res.ok) return line.reply(ev.replyToken, [msg.mergeFailed(issue)]);
+  if (params.get("a") === "approve") {
+    const res = req.pr ? await gh.mergePr(req.pr, `LINE 修改 #${issue}`) : { ok: false };
+    if (!res.ok) {
+      await line.reply(ev.replyToken, [msg.mergeFailed(issue)]);
+      if (!isAdmin(env, userId)) await line.push(env.ADMIN_USER_ID, [msg.mergeFailedForAdmin(req, site)]);
+      return;
+    }
     await gh.deleteBranch(req.branch);
     req.state = "merged";
     await st.putRequest(req);
-    await st.clearOpenIssue(req.userId, issue);
+    await st.clearOpenRequest(req.userId, site.id, issue);
+    // 管理者自己提的件：上線內容直接附在回覆裡（免費），不另外推播
+    if (isAdmin(env, userId)) return line.reply(ev.replyToken, [msg.merged(req), msg.mergedForAdmin(req, site)]);
     await line.reply(ev.replyToken, [msg.merged(req)]);
-    if (req.userId !== userId) await line.push(req.userId, [msg.merged(req)]);
+    await line.push(env.ADMIN_USER_ID, [msg.mergedForAdmin(req, site)]);
     return;
   }
 
@@ -181,14 +251,13 @@ async function handlePostback(ev, userId, env, deps) {
   await gh.deleteBranch(req.branch);
   req.state = "closed";
   await st.putRequest(req);
-  await st.clearOpenIssue(req.userId, issue);
+  await st.clearOpenRequest(req.userId, site.id, issue);
   await line.reply(ev.replyToken, [msg.rejected(req)]);
-  if (req.userId !== userId) await line.push(req.userId, [msg.rejected(req)]);
 }
 
 // ── GitHub ──────────────────────────────────────────────
 
-// workflow 在 issue 留言的第一行：<!-- line-request:status=ready;pr=12;branch=line/7 -->
+// workflow 在 issue 留言的第一行：<!-- line-request:status=ready;pr=12;branch=line/7;preview=https://… -->
 const MARKER = /<!--\s*line-request:status=([a-z]+)((?:;[a-z]+=[^;\s>]*)*)\s*-->/;
 
 export function parseMarker(body) {
@@ -207,11 +276,7 @@ export function parseMarker(body) {
   return { status: m[1], ...params, text };
 }
 
-/** Cloudflare Pages 的分支預覽網址：分支名轉小寫、非英數換成連字號 */
-export function previewUrlFor(env, branch) {
-  const alias = branch.toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 28).replace(/-+$/, "");
-  return `https://${alias}.${env.PAGES_PROJECT}.pages.dev`;
-}
+export { previewUrlFor };
 
 const issueOfBranch = (branch) => {
   const m = /^line\/(\d+)$/.exec(branch ?? "");
@@ -222,14 +287,16 @@ const inThisRound = (req, isoTime) => Date.parse(isoTime) >= req.round.startedAt
 
 export async function handleGithubEvent(event, payload, env, deps) {
   const { st } = deps;
+  const site = siteByRepo(env, payload.repository?.full_name);
+  if (!site) return; // 不是設定表裡的網站
 
   if (event === "issue_comment" && payload.action === "created") {
     if (payload.comment?.user?.login !== WORKFLOW_BOT) return;
     const marker = parseMarker(payload.comment.body);
     if (!marker) return;
-    const req = await st.getRequest(payload.issue.number);
+    const req = await st.getRequest(site.id, payload.issue.number);
     if (!req || req.state !== "open" || !inThisRound(req, payload.comment.created_at)) return;
-    await onWorkflowReport(req, marker, payload.comment.created_at, env, deps);
+    await onWorkflowReport(req, site, marker, payload.comment.created_at, env, deps);
     await st.putRequest(req);
     return;
   }
@@ -237,27 +304,26 @@ export async function handleGithubEvent(event, payload, env, deps) {
   // 有人直接在 GitHub 上合併或關掉 PR／issue：同步狀態
   if (event === "pull_request" && payload.action === "closed") {
     const issue = issueOfBranch(payload.pull_request?.head?.ref);
-    const req = issue && (await st.getRequest(issue));
+    const req = issue && (await st.getRequest(site.id, issue));
     if (!req || req.state !== "open") return;
     req.state = payload.pull_request.merged ? "merged" : "closed";
     await st.putRequest(req);
-    await st.clearOpenIssue(req.userId, issue);
+    await st.clearOpenRequest(req.userId, site.id, issue);
     if (req.state === "merged") await deps.line.push(req.userId, [msg.merged(req)]);
     return;
   }
   if (event === "issues" && payload.action === "closed") {
-    const req = await st.getRequest(payload.issue.number);
+    const req = await st.getRequest(site.id, payload.issue.number);
     if (!req || req.state !== "open") return;
     req.state = "closed";
     await st.putRequest(req);
-    await st.clearOpenIssue(req.userId, req.issue);
+    await st.clearOpenRequest(req.userId, site.id, req.issue);
   }
 }
 
-async function onWorkflowReport(req, marker, createdAt, env, deps) {
+async function onWorkflowReport(req, site, marker, createdAt, env, deps) {
   const { line } = deps;
   const round = req.round;
-  const approver = env.APPROVER_USER_ID;
   switch (marker.status) {
     case "ready":
       round.status = "ready";
@@ -265,8 +331,10 @@ async function onWorkflowReport(req, marker, createdAt, env, deps) {
       round.summary = marker.text;
       if (marker.pr) req.pr = Number(marker.pr);
       if (marker.branch) req.branch = marker.branch;
-      round.previewUrl = marker.preview || previewUrlFor(env, req.branch);
-      await notifyReady(req, env, deps);
+      round.previewUrl = marker.preview || previewUrlFor(site, req.branch);
+      if (round.notified) return; // 同一則回報重送時不重複通知
+      round.notified = true;
+      await line.push(req.userId, msg.readyForRequester(req, site));
       return;
     case "question":
     case "nochange":
@@ -277,28 +345,19 @@ async function onWorkflowReport(req, marker, createdAt, env, deps) {
     default: // error
       round.status = "error";
       round.notified = true;
-      if (req.userId !== approver) await line.push(req.userId, [msg.errorForRequester(req)]);
-      await line.push(approver, [msg.errorForApprover(req, marker.text)]);
+      if (!isAdmin(env, req.userId)) await line.push(req.userId, [msg.errorForRequester(req)]);
+      await line.push(env.ADMIN_USER_ID, [msg.errorForAdmin(req, site, marker.text)]);
   }
 }
 
-async function notifyReady(req, env, deps) {
-  const round = req.round;
-  if (round.notified) return; // 同一則回報重送時不重複通知
-  round.notified = true;
-  const approver = env.APPROVER_USER_ID;
-  await deps.line.push(approver, msg.readyForApprover(req));
-  if (req.userId !== approver) await deps.line.push(req.userId, [msg.readyForRequester(req)]);
-}
-
-// ── 排程：補送漏接的通知 ─────────────────────────────────
+// ── 排程：補做漏接的回報 ─────────────────────────────────
 
 export async function handleScheduled(env, deps) {
   for (const req of await deps.st.listOpenRequests()) {
     try {
       await reconcile(req, env, deps);
     } catch (err) {
-      console.error(`排程處理 #${req.issue} 失敗：${err?.stack ?? err}`);
+      console.error(`排程處理 ${req.site} #${req.issue} 失敗：${err?.stack ?? err}`);
     }
   }
 }
@@ -308,15 +367,17 @@ async function reconcile(req, env, deps) {
   const r = req.round;
   if (r.notified || r.status !== "working") return;
   if (deps.now() - r.startedAt <= RECONCILE_AFTER_MS) return;
+  const site = siteById(env, req.site);
+  if (!site) return;
 
   const since = new Date(r.startedAt - CLOCK_SKEW_MS).toISOString();
-  const res = await deps.gh.listComments(req.issue, since);
+  const res = await deps.gh(site).listComments(req.issue, since);
   const latest = (res.ok && Array.isArray(res.data) ? res.data : [])
     .filter((c) => c.user?.login === WORKFLOW_BOT && inThisRound(req, c.created_at))
     .map((c) => ({ marker: parseMarker(c.body), createdAt: c.created_at }))
     .filter((x) => x.marker)
     .at(-1);
   if (!latest) return; // workflow 還在跑
-  await onWorkflowReport(req, latest.marker, latest.createdAt, env, deps);
+  await onWorkflowReport(req, site, latest.marker, latest.createdAt, env, deps);
   await deps.st.putRequest(req);
 }

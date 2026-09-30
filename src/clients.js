@@ -22,6 +22,13 @@ export function lineClient(env, fetchImpl = fetch) {
     reply: (replyToken, messages) => post("/message/reply", { replyToken, messages }),
     // push 計入額度；一次呼叫帶多則訊息只算一則
     push: (to, messages) => post("/message/push", { to, messages }),
+    // bot 被拉進群組或多人聊天室時自己退出（只用私訊）
+    async leave(source) {
+      const path = source.groupId ? `/group/${source.groupId}/leave` : `/room/${source.roomId}/leave`;
+      const res = await fetchImpl(`${LINE_API}${path}`, { method: "POST", headers });
+      if (!res.ok) console.error(`LINE ${path} ${res.status}: ${await res.text()}`);
+      return res.ok;
+    },
     async displayName(userId) {
       const res = await fetchImpl(`${LINE_API}/profile/${userId}`, { headers });
       if (!res.ok) return null;
@@ -30,7 +37,7 @@ export function lineClient(env, fetchImpl = fetch) {
   };
 }
 
-export function githubClient(env, fetchImpl = fetch) {
+export function githubClient(env, fetchImpl = fetch, repo) {
   const headers = {
     Accept: "application/vnd.github+json",
     Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -38,7 +45,6 @@ export function githubClient(env, fetchImpl = fetch) {
     "User-Agent": "line-dispatch-worker",
     "X-GitHub-Api-Version": "2022-11-28",
   };
-  const repo = env.GITHUB_REPO;
   async function call(method, path, payload) {
     const res = await fetchImpl(`${GITHUB_API}/repos/${repo}${path}`, {
       method,

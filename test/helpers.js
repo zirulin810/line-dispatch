@@ -3,9 +3,11 @@
 import { handleFetch, makeDeps } from "../src/index.js";
 import { signGithub, signLine } from "../src/crypto.js";
 
-export const APPROVER = "U_approver";
+export const ADMIN = "U_admin";
 export const STAFF = "U_staff";
 export const STRANGER = "U_stranger";
+export const REPO = "my-org/my-site";
+export const SITE = { id: "mysite", name: "範例網站", repo: REPO, pagesProject: "my-site" };
 
 export function fakeKV() {
   const m = new Map();
@@ -23,7 +25,8 @@ export function fakeKV() {
       m.delete(key);
     },
     async list({ prefix }) {
-      return { keys: [...m.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })), list_complete: true };
+      const keys = [...m.keys()].filter((k) => k.startsWith(prefix)).sort().map((name) => ({ name }));
+      return { keys, list_complete: true };
     },
   };
 }
@@ -33,13 +36,11 @@ export function makeEnv() {
     STATE: fakeKV(),
     LINE_CHANNEL_SECRET: "line-secret",
     LINE_CHANNEL_ACCESS_TOKEN: "line-token",
-    APPROVER_USER_ID: APPROVER,
-    ALLOWED_USER_IDS: `${APPROVER}, ${STAFF}`,
+    ADMIN_USER_ID: ADMIN,
     GITHUB_TOKEN: "gh-token",
     GITHUB_WEBHOOK_SECRET: "gh-secret",
-    GITHUB_REPO: "my-org/my-site",
-    PAGES_PROJECT: "my-site",
     ISSUE_LABEL: "line-request",
+    SITES: [SITE],
   };
 }
 
@@ -49,17 +50,20 @@ export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [], de
   const impl = async (url, init = {}) => {
     const method = init.method ?? "GET";
     const body = init.body ? JSON.parse(init.body) : null;
-    calls.push({ url: String(url), method, body });
+    const u = String(url);
+    calls.push({ url: u, method, body });
     const json = (data, status = 200) =>
       new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-    if (String(url).includes("/profile/")) return json({ displayName: "阿姨" });
-    if (String(url).endsWith("/issues") && method === "POST") return json({ number: nextIssue++ }, 201);
-    const commentList = method === "GET" && /\/issues\/(\d+)\/comments\?/.exec(String(url));
+    const names = { [STAFF]: "阿姨", [STRANGER]: "路人", [ADMIN]: "哈咪瓜" };
+    const profile = /\/profile\/([^/]+)$/.exec(u);
+    if (profile) return json({ displayName: names[profile[1]] ?? "某人" });
+    if (u.endsWith("/issues") && method === "POST") return json({ number: nextIssue++ }, 201);
+    const commentList = method === "GET" && /\/issues\/(\d+)\/comments\?/.exec(u);
     if (commentList) return json(issueComments[commentList[1]] ?? []);
-    const issueGet = method === "GET" && /\/issues\/(\d+)$/.exec(String(url));
+    const issueGet = method === "GET" && /\/issues\/(\d+)$/.exec(u);
     if (issueGet && deletedIssues.includes(Number(issueGet[1]))) return json({ message: "Not Found" }, 404);
     if (issueGet) return json({ state: closedIssues.includes(Number(issueGet[1])) ? "closed" : "open" });
-    if (String(url).includes("/merge")) return mergeOk ? json({ merged: true }) : json({ message: "conflict" }, 405);
+    if (u.includes("/merge")) return mergeOk ? json({ merged: true }) : json({ message: "conflict" }, 405);
     return json({});
   };
   return { impl, calls };
@@ -68,14 +72,13 @@ export function fakeFetch({ nextIssue = 7, mergeOk = true, closedIssues = [], de
 export function setup(opts = {}) {
   const env = makeEnv();
   const f = fakeFetch(opts);
-  f.closedIssues = opts.closedIssues;
   let clock = opts.now ?? Date.parse("2026-09-28T10:00:00Z");
   const deps = makeDeps(env, f.impl, () => clock);
-  return {
+  const t = {
     env,
     deps,
     calls: f.calls,
-    setNow: (t) => (clock = t),
+    setNow: (v) => (clock = v),
     clearCalls: () => (f.calls.length = 0),
     async line(events, { signature } = {}) {
       const body = JSON.stringify({ destination: "x", events });
@@ -86,8 +89,8 @@ export function setup(opts = {}) {
         deps,
       );
     },
-    async github(event, payload, { signature } = {}) {
-      const body = JSON.stringify(payload);
+    async github(event, payload, { signature, repo = REPO } = {}) {
+      const body = JSON.stringify({ repository: { full_name: repo }, ...payload });
       const sig = signature ?? (await signGithub(env.GITHUB_WEBHOOK_SECRET, body));
       return handleFetch(
         new Request("https://w.example/github/webhook", {
@@ -99,23 +102,37 @@ export function setup(opts = {}) {
         deps,
       );
     },
+    // 讓某人通過審核（直接寫 KV，省得每個測試都走一遍審核流程）
+    async approve(userId, name = "阿姨") {
+      await env.STATE.put(`member:${userId}`, JSON.stringify({ name, status: "approved", sites: [SITE.id] }));
+    },
   };
+  return t;
 }
 
-// ── 事件產生器 ──
-export const textEvent = (userId, text) => ({
-  type: "message",
+// ── 事件產生器（預設是私訊）──
+const base = (userId, extra = {}) => ({
   replyToken: `rt-${Math.random()}`,
   source: { type: "user", userId },
-  message: { type: "text", id: "1", text },
   deliveryContext: { isRedelivery: false },
+  ...extra,
 });
 
-export const postbackEvent = (userId, data) => ({
-  type: "postback",
+export const textEvent = (userId, text) => ({
+  type: "message",
+  ...base(userId),
+  message: { type: "text", id: "1", text },
+});
+
+export const followEvent = (userId) => ({ type: "follow", ...base(userId) });
+
+export const postbackEvent = (userId, data) => ({ type: "postback", ...base(userId), postback: { data } });
+
+export const groupEvent = (type, groupId = "C_group") => ({
+  type,
   replyToken: `rt-${Math.random()}`,
-  source: { type: "user", userId },
-  postback: { data },
+  source: { type: "group", groupId, userId: STAFF },
+  message: type === "message" ? { type: "text", id: "1", text: "hi" } : undefined,
   deliveryContext: { isRedelivery: false },
 });
 
@@ -125,23 +142,17 @@ export const workflowComment = (issue, body, createdAt, login = "github-actions[
   comment: { user: { login }, body, created_at: createdAt },
 });
 
-export const pagesCheckRun = (branch, completedAt, conclusion = "success") => ({
-  action: "completed",
-  check_run: {
-    app: { slug: "cloudflare-workers-and-pages", name: "Cloudflare Workers and Pages" },
-    conclusion,
-    completed_at: completedAt,
-    check_suite: { head_branch: branch },
-  },
-});
-
 export const readyBody = (pr, issue, summary = "把關於我們的營業時間改成週日公休。",
   preview = `https://line-${issue}.my-site.pages.dev`) =>
   `<!-- line-request:status=ready;pr=${pr};branch=line/${issue};preview=${preview} -->\n${summary}\n\n預覽：${preview}\nPR：#${pr}`;
 
-// 篩出某種呼叫
+// ── 篩出某種呼叫 ──
 export const pushes = (calls, to) =>
   calls.filter((c) => c.url.endsWith("/message/push") && (!to || c.body.to === to));
 export const replies = (calls) => calls.filter((c) => c.url.endsWith("/message/reply"));
+export const replyText = (calls, i = 0) => replies(calls)[i]?.body.messages.map((m) => m.text ?? "").join("\n");
 export const ghCalls = (calls, method, pathPart) =>
   calls.filter((c) => c.url.includes("api.github.com") && c.method === method && c.url.includes(pathPart));
+export const createdIssues = (calls) => calls.filter((c) => c.method === "POST" && c.url.endsWith("/issues"));
+export const comments = (calls) => ghCalls(calls, "POST", "/comments");
+export const merges = (calls) => ghCalls(calls, "PUT", "/merge");
