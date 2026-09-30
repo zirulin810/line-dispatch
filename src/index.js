@@ -183,6 +183,7 @@ async function onPostback(ev, userId, env, deps) {
   const action = params.get("a");
   if (action === "grant" || action === "ignore") return onReview(ev, userId, params, env, deps);
   if (action === "approve" || action === "reject") return onDecision(ev, userId, params, env, deps);
+  if (action === "cancel" || action === "keep") return onCancelDecision(ev, userId, params, env, deps);
 }
 
 // 管理者審核新好友
@@ -253,6 +254,35 @@ async function onDecision(ev, userId, params, env, deps) {
   await st.putRequest(req);
   await st.clearOpenRequest(req.userId, site.id, issue);
   await line.reply(ev.replyToken, [msg.rejected(req)]);
+}
+
+// 提出者確認要不要取消（Claude 判斷對方想放棄時才會出現這組按鈕）
+async function onCancelDecision(ev, userId, params, env, deps) {
+  const { line, st } = deps;
+  const site = siteById(env, params.get("s")) ?? defaultSite(env);
+  const issue = Number(params.get("n"));
+  const req = issue && (await st.getRequest(site.id, issue));
+  if (!req || req.state !== "open") return line.reply(ev.replyToken, [msg.alreadyDone(issue)]);
+  if (userId !== req.userId) return line.reply(ev.replyToken, [msg.onlyRequester()]);
+  if (params.get("r") !== req.round.id || req.round.status !== "cancel") {
+    return line.reply(ev.replyToken, [msg.staleButton(issue)]);
+  }
+
+  if (params.get("a") === "keep") {
+    req.round.status = "kept"; // 這組按鈕用過了；件照樣開著，下一則訊息接著改
+    await st.putRequest(req);
+    return line.reply(ev.replyToken, [msg.keepGoing(req)]);
+  }
+
+  // 確定取消：關 PR、關 issue、刪分支
+  const gh = deps.gh(site);
+  if (req.pr) await gh.closePr(req.pr);
+  await gh.closeIssue(issue);
+  await gh.deleteBranch(req.branch);
+  req.state = "closed";
+  await st.putRequest(req);
+  await st.clearOpenRequest(req.userId, site.id, issue);
+  await line.reply(ev.replyToken, [msg.cancelled(req)]);
 }
 
 // ── GitHub ──────────────────────────────────────────────
@@ -335,6 +365,11 @@ async function onWorkflowReport(req, site, marker, createdAt, env, deps) {
       if (round.notified) return; // 同一則回報重送時不重複通知
       round.notified = true;
       await line.push(req.userId, msg.readyForRequester(req, site));
+      return;
+    case "cancel":
+      round.status = "cancel";
+      round.notified = true;
+      await line.push(req.userId, msg.confirmCancel(req, site));
       return;
     case "question":
     case "nochange":

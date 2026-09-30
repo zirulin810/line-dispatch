@@ -31,6 +31,19 @@ export const msg = {
     ];
   },
 
+  // Claude 判斷對方要放棄這件：先確認
+  confirmCancel: (req, site) => {
+    const data = (a) => `a=${a}&s=${site.id}&n=${req.issue}&r=${req.round.id}`;
+    return [
+      buttons(`要取消 #${req.issue} 嗎？`, `要取消${site.name} #${req.issue} 嗎？`, [
+        postback("確定取消", data("cancel"), `確定取消 #${req.issue}`),
+        postback("繼續修改", data("keep"), "繼續修改"),
+      ]),
+    ];
+  },
+  cancelled: (req) => text(`#${req.issue} 已取消。之後有要改的，直接傳訊息就好。`),
+  keepGoing: (req) => text(`好的，#${req.issue} 繼續進行，可以繼續告訴我要改什麼。`),
+
   // workflow 需要反問、沒有要改的、失敗
   question: (req, body) => text(`關於 #${req.issue}：\n\n${body}`),
   nochange: (req, body) => text(`#${req.issue}：${body}`),

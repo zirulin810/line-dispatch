@@ -326,6 +326,105 @@ test("管理者自己提的件：上線內容附在回覆裡，不另外推播",
   assert.equal(pushes(t.calls).length, 0);
 });
 
+// ── 用對話取消 ──
+
+const cancelBody = "<!-- line-request:status=cancel -->\n對方表示不用改了，等對方確認取消。";
+
+// STAFF 開件、改好一次，然後說「算了」→ workflow 回報取消；回傳取消這一輪的 id
+async function cancelRequested(t) {
+  await readyRequest(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "算了，不用改了")]);
+  await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
+  return (await t.env.STATE.get(`req:${SITE.id}:7`, "json")).round.id;
+}
+
+test("Claude 判斷要取消 → 推給提出者［確定取消］［繼續修改］，還沒結案", async () => {
+  const t = setup();
+  await readyRequest(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "算了，不用改了")]);
+  t.clearCalls();
+  await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
+  const [p] = pushes(t.calls, STAFF);
+  const tpl = p.body.messages[0].template;
+  assert.match(tpl.text, /要取消範例網站 #7 嗎/);
+  assert.deepEqual(tpl.actions.map((a) => a.label), ["確定取消", "繼續修改"]);
+  assert.equal((await t.env.STATE.get(`req:${SITE.id}:7`, "json")).state, "open");
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+  assert.equal(pushes(t.calls, ADMIN).length, 0);
+});
+
+test("按［確定取消］→ 關 PR、issue、刪分支，回「已取消」；之後的新訊息開新件", async () => {
+  const t = setup();
+  const round = await cancelRequested(t);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, `a=cancel&s=${SITE.id}&n=7&r=${round}`)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/pulls/12")[0].body.state, "closed");
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed");
+  assert.equal(ghCalls(t.calls, "DELETE", "/git/refs/heads/line/7").length, 1);
+  assert.match(replyText(t.calls), /#7 已取消/);
+  assert.equal(merges(t.calls).length, 0);
+  t.clearCalls();
+  await t.line([textEvent(STAFF, "電話改成 06-1234567")]);
+  assert.equal(createdIssues(t.calls).length, 1);
+  assert.equal(comments(t.calls).length, 0);
+});
+
+test("按［繼續修改］→ 件保持開著，下一則訊息接著改；取消按鈕不能再用", async () => {
+  const t = setup();
+  const round = await cancelRequested(t);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, `a=keep&s=${SITE.id}&n=7&r=${round}`)]);
+  assert.match(replyText(t.calls), /繼續進行/);
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, `a=cancel&s=${SITE.id}&n=7&r=${round}`)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+  assert.match(replyText(t.calls), /比較舊/);
+  t.clearCalls();
+  await t.line([textEvent(STAFF, "字改成紅色")]);
+  assert.match(comments(t.calls)[0].url, /\/issues\/7\/comments$/);
+});
+
+test("取消確認按鈕：只有提出者按得動；之前那輪的［上線］也失效", async () => {
+  const t = setup();
+  const readyRound = await readyRequest(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "算了")]);
+  await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
+  const round = (await t.env.STATE.get(`req:${SITE.id}:7`, "json")).round.id;
+  t.clearCalls();
+  for (const who of [ADMIN, STRANGER]) {
+    await t.line([postbackEvent(who, `a=cancel&s=${SITE.id}&n=7&r=${round}`)]);
+  }
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
+  assert.match(replyText(t.calls, 0), /只有提出這件修改的人/);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, decide("approve", readyRound))]);
+  assert.equal(merges(t.calls).length, 0);
+});
+
+test("反問之後說算了 → 一樣能確認取消並結案", async () => {
+  const t = setup();
+  await t.approve(STAFF);
+  await t.line([textEvent(STAFF, "那個字改大一點")]);
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=question -->\n哪一頁？", iso(T0 + 60_000)));
+  t.setNow(T0 + 5 * 60_000);
+  await t.line([textEvent(STAFF, "算了不用了")]);
+  await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 6 * 60_000)));
+  const round = (await t.env.STATE.get(`req:${SITE.id}:7`, "json")).round.id;
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, `a=cancel&s=${SITE.id}&n=7&r=${round}`)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed");
+  assert.equal(ghCalls(t.calls, "PATCH", "/pulls/").length, 0); // 還沒有 PR
+  assert.equal(await t.env.STATE.get(`open:${STAFF}`), null);
+});
+
+test("parseMarker 看得懂取消回報", () => {
+  assert.equal(parseMarker(cancelBody).status, "cancel");
+});
+
 // ── 舊資料相容（改版前開的件）──
 
 test("改版前的件（舊的 KV 鍵、沒有網站欄位）能繼續追加、收通知、上線", async () => {

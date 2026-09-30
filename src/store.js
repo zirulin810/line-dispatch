@@ -35,7 +35,7 @@ export function newRound(now) {
   return {
     id: String(now), // 放進［上線］按鈕，舊輪的按鈕按了不算數
     startedAt: now,
-    status: "working", // working | ready | question | nochange | error
+    status: "working", // working | ready | question | nochange | error | cancel（等對方確認取消）| kept（對方選繼續）
     readyAt: null,
     summary: null,
     previewUrl: null,
