@@ -224,7 +224,7 @@ test("workflow 回報改好 → 只推給提出者（含按鈕），管理者不
   assert.match(text.text, /週日公休/);
   assert.match(text.text, /https:\/\/line-7\.my-site\.pages\.dev/);
   assert.doesNotMatch(text.text, /line-request:status|PR：/);
-  assert.deepEqual(buttons.template.actions.map((a) => a.label), ["看預覽", "上線", "退回"]);
+  assert.deepEqual(buttons.template.actions.map((a) => a.label), ["看預覽", "上線", "取消這件"]);
   assert.equal(pushes(t.calls, ADMIN).length, 0);
 });
 
@@ -315,7 +315,7 @@ test("不是提出者按［上線］（包括管理者）→ 拒絕，不合併"
   }
 });
 
-test("按舊一輪的［上線］→ 不合併", async () => {
+test("Claude 正在改的時候按舊的［上線］→ 回「正在修改中」，不合併", async () => {
   const t = setup();
   const oldRound = await readyRequest(t);
   t.setNow(T0 + 10 * 60_000);
@@ -323,7 +323,7 @@ test("按舊一輪的［上線］→ 不合併", async () => {
   t.clearCalls();
   await t.line([postbackEvent(STAFF, decide("approve", oldRound))]);
   assert.equal(merges(t.calls).length, 0);
-  assert.match(replyText(t.calls), /比較舊的預覽/);
+  assert.match(replyText(t.calls), /正在修改中/);
 });
 
 test("合併失敗 → 告知提出者並通知管理者，件保持開著", async () => {
@@ -336,16 +336,26 @@ test("合併失敗 → 告知提出者並通知管理者，件保持開著", asy
   assert.equal((await t.env.STATE.get(`req:${SITE.id}:7`, "json")).state, "open");
 });
 
-test("提出者按［退回］→ 關 PR 與 issue、刪分支，不通知管理者", async () => {
+test("改好通知上的［取消這件］→ 關 PR 與 issue、刪分支，不通知管理者", async () => {
+  const t = setup();
+  await readyRequest(t);
+  const data = pushes(t.calls, STAFF)[0].body.messages[1].template.actions[2].data;
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, data)]);
+  assert.equal(merges(t.calls).length, 0);
+  assert.equal(ghCalls(t.calls, "PATCH", "/pulls/12")[0].body.state, "closed");
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed");
+  assert.match(replyText(t.calls), /#7 已取消/);
+  assert.equal(pushes(t.calls).length, 0);
+});
+
+test("改版前發出的［退回］→ 當成取消", async () => {
   const t = setup();
   const round = await readyRequest(t);
   t.clearCalls();
   await t.line([postbackEvent(STAFF, decide("reject", round))]);
-  assert.equal(merges(t.calls).length, 0);
-  assert.equal(ghCalls(t.calls, "PATCH", "/pulls/12")[0].body.state, "closed");
   assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed");
-  assert.match(replyText(t.calls), /沒有上線/);
-  assert.equal(pushes(t.calls).length, 0);
+  assert.match(replyText(t.calls), /#7 已取消/);
 });
 
 test("管理者自己提的件：上線內容附在回覆裡，不另外推播", async () => {
@@ -371,7 +381,7 @@ async function cancelRequested(t) {
   return (await t.env.STATE.get(`req:${SITE.id}:7`, "json")).round.id;
 }
 
-test("提出者說不做了 → 直接跳「要取消嗎」＋［取消這件］，還沒結案", async () => {
+test("提出者說不做了（已有預覽）→ 只傳「要取消嗎」文字，不附按鈕，還沒結案", async () => {
   const t = setup();
   await readyRequest(t);
   t.setNow(T0 + 10 * 60_000);
@@ -379,12 +389,24 @@ test("提出者說不做了 → 直接跳「要取消嗎」＋［取消這件］
   t.clearCalls();
   await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
   const msgs = pushes(t.calls, STAFF)[0].body.messages;
-  assert.equal(msgs.length, 1); // 不說明原因，直接問
-  assert.match(msgs[0].template.text, /要取消範例網站 #7 嗎？要繼續的話直接回覆我/);
-  assert.deepEqual(msgs[0].template.actions.map((a) => a.label), ["取消這件"]);
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].type, "text"); // 不附按鈕
+  assert.equal(msgs[0].text, "要取消範例網站 #7 嗎？要繼續的話直接回覆我就好。");
   assert.equal((await t.env.STATE.get(`req:${SITE.id}:7`, "json")).state, "open");
   assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
   assert.equal(pushes(t.calls, ADMIN).length, 0);
+});
+
+test("提出者說不做了（還沒有任何修改）→ 「要取消嗎」＋［取消這件］", async () => {
+  const t = setup();
+  await t.approve(STAFF);
+  await t.line([textEvent(STAFF, "算了")]);
+  t.clearCalls();
+  await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 60_000)));
+  const msgs = pushes(t.calls, STAFF)[0].body.messages;
+  assert.equal(msgs.length, 1);
+  assert.match(msgs[0].template.text, /要取消範例網站 #7 嗎？/);
+  assert.deepEqual(msgs[0].template.actions.map((a) => a.label), ["取消這件"]);
 });
 
 test("按［取消這件］→ 關 PR、issue、刪分支，回「已取消」；之後的新訊息開新件", async () => {
@@ -416,9 +438,9 @@ test("說不做了之後又直接回覆 → 接著改同一件，那顆［取消
   assert.match(replyText(t.calls), /比較舊/);
 });
 
-test("取消確認按鈕：只有提出者按得動；之前那輪的［上線］也失效", async () => {
+test("取消按鈕只有提出者按得動", async () => {
   const t = setup();
-  const readyRound = await readyRequest(t);
+  await readyRequest(t);
   t.setNow(T0 + 10 * 60_000);
   await t.line([textEvent(STAFF, "算了")]);
   await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
@@ -429,9 +451,6 @@ test("取消確認按鈕：只有提出者按得動；之前那輪的［上線�
   }
   assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
   assert.match(replyText(t.calls, 0), /只有提出這件修改的人/);
-  t.clearCalls();
-  await t.line([postbackEvent(STAFF, decide("approve", readyRound))]);
-  assert.equal(merges(t.calls).length, 0);
 });
 
 test("反問之後說算了 → 一樣能確認取消並結案", async () => {
@@ -450,7 +469,7 @@ test("反問之後說算了 → 一樣能確認取消並結案", async () => {
   assert.equal(await t.env.STATE.get(`open:${STAFF}`), null);
 });
 
-test("反問、沒有要改的、失敗的通知都附［取消這件］，按下直接結案", async () => {
+test("還沒有任何修改時，反問、沒有要改的、失敗的通知只附［取消這件］，按下直接結案", async () => {
   const cases = [
     ["question", "<!-- line-request:status=question -->\n這需要處理圖片，目前沒辦法。"],
     ["nochange", "<!-- line-request:status=nochange -->\n看起來已經是這樣了。"],
@@ -463,14 +482,109 @@ test("反問、沒有要改的、失敗的通知都附［取消這件］，按�
     t.clearCalls();
     await t.github("issue_comment", workflowComment(7, body, iso(T0 + 60_000)));
     const msgs = pushes(t.calls, STAFF)[0].body.messages;
+    assert.deepEqual(msgs.at(-1).template.actions.map((a) => a.label), ["取消這件"], status);
     const btn = msgs.at(-1).template.actions[0];
-    assert.equal(btn.label, "取消這件", status);
     t.clearCalls();
     await t.line([postbackEvent(STAFF, btn.data)]);
     assert.equal(ghCalls(t.calls, "PATCH", "/issues/7")[0].body.state, "closed", status);
     assert.match(replyText(t.calls), /#7 已取消/, status);
     assert.equal(await t.env.STATE.get(`open:${STAFF}`), null, status);
   }
+});
+
+// ── 舊的［上線］按鈕：直到出現更新的預覽前都有效 ──
+
+const oldApproveData = (t) => pushes(t.calls, STAFF)[0].body.messages[1].template.actions[1].data;
+
+test("預覽出來後又傳訊息、Claude 回「沒有要改的」→ 不附按鈕，舊的［上線］照樣能按", async () => {
+  const t = setup();
+  await readyRequest(t);
+  const data = oldApproveData(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "顏色沒問題，直接上線")]);
+  t.clearCalls();
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=nochange -->\n可以直接上線。", iso(T0 + 11 * 60_000)));
+  const msgs = pushes(t.calls, STAFF)[0].body.messages;
+  assert.deepEqual(msgs.map((m) => m.type), ["text"]);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, data)]);
+  assert.equal(merges(t.calls)[0].url, `https://api.github.com/repos/${REPO}/pulls/12/merge`);
+  assert.match(replyText(t.calls), /已上線/);
+});
+
+test("Claude 反問或對方說不做了之後，舊的［上線］也照樣能按", async () => {
+  for (const body of ["<!-- line-request:status=question -->\n哪一段？", cancelBody]) {
+    const t = setup();
+    await readyRequest(t);
+    const data = oldApproveData(t);
+    t.setNow(T0 + 10 * 60_000);
+    await t.line([textEvent(STAFF, "字體顏色有點跑掉？")]);
+    await t.github("issue_comment", workflowComment(7, body, iso(T0 + 11 * 60_000)));
+    t.clearCalls();
+    await t.line([postbackEvent(STAFF, data)]);
+    assert.equal(merges(t.calls).length, 1, body);
+  }
+});
+
+test("出現更新的預覽後 → 舊的［上線］失效，新的才能按", async () => {
+  const t = setup();
+  await readyRequest(t);
+  const oldData = oldApproveData(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "字再大一點")]);
+  t.clearCalls();
+  await t.github("issue_comment", workflowComment(7, readyBody(12, 7, "字放大了"), iso(T0 + 11 * 60_000)));
+  const newData = oldApproveData(t);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, oldData)]);
+  assert.equal(merges(t.calls).length, 0);
+  assert.match(replyText(t.calls), /比較舊/);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, newData)]);
+  assert.equal(merges(t.calls).length, 1);
+});
+
+test("之後那輪執行失敗 → 不附按鈕，舊的［上線］照樣能按（預覽網址顯示的就是分支最新內容）", async () => {
+  const t = setup();
+  await readyRequest(t);
+  const data = oldApproveData(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "字再大一點")]);
+  t.clearCalls();
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=error -->\n沒有完成", iso(T0 + 11 * 60_000)));
+  assert.ok(pushes(t.calls, STAFF)[0].body.messages.every((m) => m.type === "text"));
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, data)]);
+  assert.equal(merges(t.calls).length, 1);
+});
+
+test("已有預覽、Claude 又在改的時候按［上線］或［取消這件］→ 回「正在修改中」", async () => {
+  const t = setup();
+  await readyRequest(t);
+  const acts = pushes(t.calls, STAFF)[0].body.messages[1].template.actions;
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "字再大一點")]);
+  for (const a of acts.slice(1)) {
+    t.clearCalls();
+    await t.line([postbackEvent(STAFF, a.data)]);
+    assert.equal(merges(t.calls).length, 0, a.label);
+    assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0, a.label);
+    assert.match(replyText(t.calls), /正在修改中/, a.label);
+  }
+});
+
+test("舊的［取消這件］不會因為這個規則復活：只對發出它的那一輪有效", async () => {
+  const t = setup();
+  await t.approve(STAFF);
+  await t.line([textEvent(STAFF, "那個字改大一點")]);
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=question -->\n哪一頁？", iso(T0 + 60_000)));
+  const data = pushes(t.calls, STAFF)[0].body.messages[1].template.actions[0].data;
+  t.setNow(T0 + 5 * 60_000);
+  await t.line([textEvent(STAFF, "首頁")]);
+  await t.github("issue_comment", workflowComment(7, "<!-- line-request:status=question -->\n哪一段？", iso(T0 + 6 * 60_000)));
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, data)]);
+  assert.equal(ghCalls(t.calls, "PATCH", "/issues/7").length, 0);
 });
 
 test("反問後對方接著回覆 → 那顆［取消這件］就失效", async () => {
@@ -521,19 +635,51 @@ test("剛收到「改好了」就按［上線］（讀到還沒同步的舊狀�
   assert.match(pushes(t.calls, ADMIN)[0].body.messages[0].text, /pull\/12\/files/);
 });
 
-test("剛收到「要取消嗎」就按［取消這件］（讀到舊狀態）→ 照樣取消，並關掉按鈕帶的 PR", async () => {
-  const t = setup();
+test("剛收到「要取消嗎」就按改好通知上的［取消這件］（讀到還在改的舊狀態）→ 查 GitHub 回報後照樣取消", async () => {
+  const comments7 = [];
+  const t = setup({ issueComments: { 7: comments7 } });
   await readyRequest(t);
+  const btn = pushes(t.calls, STAFF)[0].body.messages[1].template.actions[2];
+  assert.equal(btn.label, "取消這件");
   t.setNow(T0 + 10 * 60_000);
   await t.line([textEvent(STAFF, "算了")]);
-  t.clearCalls();
+  comments7.push({ user: { login: "github-actions[bot]" }, body: cancelBody, created_at: iso(T0 + 11 * 60_000) });
   await t.github("issue_comment", workflowComment(7, cancelBody, iso(T0 + 11 * 60_000)));
-  const btn = pushes(t.calls, STAFF)[0].body.messages[0].template.actions[0];
   await makeStale(t);
   t.clearCalls();
   await t.line([postbackEvent(STAFF, btn.data)]);
   assert.equal(ghCalls(t.calls, "PATCH", "/pulls/12")[0].body.state, "closed");
   assert.match(replyText(t.calls), /#7 已取消/);
+});
+
+test("剛收到反問就按舊的［上線］（讀到還在改的舊狀態）→ 查 GitHub 回報後照樣合併", async () => {
+  const comments7 = [];
+  const t = setup({ issueComments: { 7: comments7 } });
+  await readyRequest(t);
+  const data = oldApproveData(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "哪裡可以再調？")]);
+  const q = "<!-- line-request:status=question -->\n要調哪一段？";
+  comments7.push({ user: { login: "github-actions[bot]" }, body: q, created_at: iso(T0 + 11 * 60_000) });
+  await t.github("issue_comment", workflowComment(7, q, iso(T0 + 11 * 60_000)));
+  await makeStale(t);
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, data)]);
+  assert.equal(merges(t.calls)[0].url, `https://api.github.com/repos/${REPO}/pulls/12/merge`);
+});
+
+test("讀到還在改、GitHub 上已經有更新的預覽（KV 還沒同步）→ 舊的［上線］失效", async () => {
+  const comments7 = [];
+  const t = setup({ issueComments: { 7: comments7 } });
+  await readyRequest(t);
+  const data = oldApproveData(t);
+  t.setNow(T0 + 10 * 60_000);
+  await t.line([textEvent(STAFF, "字再大一點")]);
+  comments7.push({ user: { login: "github-actions[bot]" }, body: readyBody(12, 7, "字放大了"), created_at: iso(T0 + 11 * 60_000) });
+  t.clearCalls();
+  await t.line([postbackEvent(STAFF, data)]);
+  assert.equal(merges(t.calls).length, 0);
+  assert.match(replyText(t.calls), /比較舊/);
 });
 
 test("parseMarker 看得懂取消回報", () => {

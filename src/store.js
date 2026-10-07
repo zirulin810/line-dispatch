@@ -26,6 +26,7 @@ export function newRequest({ site, issue, userId, name, now }) {
     name,
     state: "open", // open | merged | closed
     pr: null,
+    readyRoundId: null, // 最新預覽是哪一輪發的（那一輪的［上線］在出現更新的預覽前都有效）
     branch: `line/${issue}`,
     round: newRound(now),
   };

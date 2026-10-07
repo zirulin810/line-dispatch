@@ -1,3 +1,10 @@
 node_modules/
 .wrangler/
 .dev.vars
+
+# 憑證：只放本機，不進 git
+.env
+secrets.json
+
+# KV 匯出的備份（含好友的 LINE userId）
+tmp/

@@ -9,7 +9,7 @@ crons = ["*/5 * * * *"]
 # 成員審核狀態與件的狀態（誰的件、PR 編號、這一輪進度）。id 在首次設定時用 `npx wrangler kv namespace create STATE` 產生後填入
 [[kv_namespaces]]
 binding = "STATE"
-id = "4fe0513c1fa24804b3a22c3844ceac05"
+id = "de4250c261a54c68bc0b6d9d5838d509"
 
 [vars]
 ISSUE_LABEL = "line-request"
@@ -17,7 +17,7 @@ ISSUE_LABEL = "line-request"
 # 網站設定表：要開放新網站時在這裡加一筆（說明見 src/sites.js），
 # 並在該網站的 repo 裝上 line-request workflow 與 CLAUDE.md 守則。
 SITES = [
-  { id = "dongguang", name = "東光網站", repo = "dongguang-medical/dongguang-medical.github.io", pagesProject = "dongguang-medical" },
+  { id = "dongguang", name = "東光網站", repo = "dongguang-medical/dongguang-medical.github.io", pagesProject = "dongguang-medical-edit-preview" },
 ]
 
 # 以下用 `npx wrangler secret put <名稱>` 設定，不寫在這裡：

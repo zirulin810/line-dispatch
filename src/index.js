@@ -182,8 +182,8 @@ async function onPostback(ev, userId, env, deps) {
   const params = new URLSearchParams(ev.postback?.data ?? "");
   const action = params.get("a");
   if (action === "grant" || action === "ignore") return onReview(ev, userId, params, env, deps);
-  if (action === "approve" || action === "reject") return onDecision(ev, userId, params, env, deps);
-  if (action === "cancel") return onCancel(ev, userId, params, env, deps);
+  if (action === "approve") return onApprove(ev, userId, params, env, deps);
+  if (action === "cancel" || action === "reject") return onCancel(ev, userId, params, env, deps);
 }
 
 // 管理者審核新好友。按鈕反映管理者「最後一次」的決定：忽略後可以再開放，開放後也可以按忽略收回。
@@ -215,58 +215,67 @@ async function onReview(ev, userId, params, env, deps) {
   await line.push(target, [msg.guide(site)]);
 }
 
-// 提出者按的按鈕（上線、退回、取消）共用的檢查。
+// 提出者按的按鈕（上線、取消這件）共用的檢查。
 //
-// 不看這件的「狀態」：狀態是 GitHub 那邊的事件寫進 KV 的，KV 最久要約 60 秒才會同步到
-// 處理 LINE 事件的地方，剛收到通知就按的話會讀到舊狀態。按鈕是 bot 自己發的、對方偽造不了，
-// 按鈕存在就代表當時已經是那個狀態，需要的資訊（PR 編號）也直接帶在按鈕裡。
-// 只檢查「是不是提出者」與「是不是最新一輪」：這兩項都是 LINE 這邊寫的，同一處讀寫、不會延遲。
+// 不看這件的「狀態」來判斷按鈕還能不能用：狀態多半是 GitHub 那邊的事件寫進 KV 的，KV 最久要約 60 秒
+// 才會同步到處理 LINE 事件的地方。按鈕是 bot 自己發的、對方偽造不了，按鈕存在就代表當時已經是那個狀態，
+// 需要的資訊（PR 編號）也直接帶在按鈕裡。
+//
+// 按鈕只有兩組：
+//   ・新的預覽（改好通知）：［看預覽］［上線］［取消這件］，一直有效到出現更新的預覽為止；
+//     Claude 正在改的時候先擋下，避免改到一半就上線
+//   ・還沒有任何修改時的通知：只有［取消這件］，只對發出它的那一輪有效
 async function checkButton(ev, userId, params, env, deps) {
   const { line, st } = deps;
   // 改版前的按鈕沒有帶網站，視為第一個網站
   const site = siteById(env, params.get("s")) ?? defaultSite(env);
   const issue = Number(params.get("n"));
   const req = issue && (await st.getRequest(site.id, issue));
-  if (!req || req.state !== "open") return void (await line.reply(ev.replyToken, [msg.alreadyDone(issue)]));
-  if (userId !== req.userId) return void (await line.reply(ev.replyToken, [msg.onlyRequester()]));
-  // 之後又追加過修改（或按過［繼續修改］）的話，舊通知上的按鈕不算數
-  if (params.get("r") !== req.round.id) return void (await line.reply(ev.replyToken, [msg.staleButton(issue)]));
+  const reply = (m) => line.reply(ev.replyToken, [m]).then(() => null);
+  if (!req || req.state !== "open") return reply(msg.alreadyDone(issue));
+  if (userId !== req.userId) return reply(msg.onlyRequester());
+
+  const r = params.get("r");
+  if (r !== req.round.id) {
+    // 不是最新這一輪發的按鈕（最新一輪的按鈕不管讀到的狀態是什麼都放行，見上方說明）
+    if (!r || r !== req.readyRoundId) return reply(msg.staleButton(issue));
+    // 讀到這一輪還在改：可能真的在改，也可能回報剛到、KV 還沒同步，以 GitHub 上的回報留言為準
+    if (req.round.status === "working") {
+      const latest = await latestReport(req, site, deps);
+      if (!latest) return reply(msg.stillWorking(issue)); // 還在改，避免改到一半就上線
+      if (latest.marker.status === "ready") return reply(msg.staleButton(issue)); // 已經有更新的預覽
+    }
+  }
   const pr = Number(params.get("pr")) || req.pr;
   if (pr) req.pr = pr;
   return { site, issue, req };
 }
 
-// 提出者按［上線］／［退回］
-async function onDecision(ev, userId, params, env, deps) {
+// 提出者按［上線］
+async function onApprove(ev, userId, params, env, deps) {
   const { line, st } = deps;
   const checked = await checkButton(ev, userId, params, env, deps);
   if (!checked) return;
   const { site, issue, req } = checked;
   const gh = deps.gh(site);
 
-  if (params.get("a") === "approve") {
-    const res = req.pr ? await gh.mergePr(req.pr, `LINE 修改 #${issue}`) : { ok: false };
-    if (!res.ok) {
-      await line.reply(ev.replyToken, [msg.mergeFailed(issue)]);
-      if (!isAdmin(env, userId)) await line.push(env.ADMIN_USER_ID, [msg.mergeFailedForAdmin(req, site)]);
-      return;
-    }
-    await gh.deleteBranch(req.branch);
-    req.state = "merged";
-    await st.putRequest(req);
-    await st.clearOpenRequest(req.userId, site.id, issue);
-    // 管理者自己提的件：上線內容直接附在回覆裡（免費），不另外推播
-    if (isAdmin(env, userId)) return line.reply(ev.replyToken, [msg.merged(req), msg.mergedForAdmin(req, site)]);
-    await line.reply(ev.replyToken, [msg.merged(req)]);
-    await line.push(env.ADMIN_USER_ID, [msg.mergedForAdmin(req, site)]);
+  const res = req.pr ? await gh.mergePr(req.pr, `LINE 修改 #${issue}`) : { ok: false };
+  if (!res.ok) {
+    await line.reply(ev.replyToken, [msg.mergeFailed(issue)]);
+    if (!isAdmin(env, userId)) await line.push(env.ADMIN_USER_ID, [msg.mergeFailedForAdmin(req, site)]);
     return;
   }
-
-  await closeRequest(req, site, deps);
-  await line.reply(ev.replyToken, [msg.rejected(req)]);
+  await gh.deleteBranch(req.branch);
+  req.state = "merged";
+  await st.putRequest(req);
+  await st.clearOpenRequest(req.userId, site.id, issue);
+  // 管理者自己提的件：上線內容直接附在回覆裡（免費），不另外推播
+  if (isAdmin(env, userId)) return line.reply(ev.replyToken, [msg.merged(req), msg.mergedForAdmin(req, site)]);
+  await line.reply(ev.replyToken, [msg.merged(req)]);
+  await line.push(env.ADMIN_USER_ID, [msg.mergedForAdmin(req, site)]);
 }
 
-// 提出者按［取消這件］
+// 提出者按［取消這件］（改版前的［退回］也走這裡）
 async function onCancel(ev, userId, params, env, deps) {
   const checked = await checkButton(ev, userId, params, env, deps);
   if (!checked) return;
@@ -274,7 +283,7 @@ async function onCancel(ev, userId, params, env, deps) {
   await deps.line.reply(ev.replyToken, [msg.cancelled(checked.req)]);
 }
 
-// 結案不上線（退回、取消共用）：關 PR、關 issue、刪分支
+// 結案不上線：關 PR、關 issue、刪分支
 async function closeRequest(req, site, deps) {
   const gh = deps.gh(site);
   if (req.pr) await gh.closePr(req.pr);
@@ -362,6 +371,7 @@ async function onWorkflowReport(req, site, marker, createdAt, env, deps) {
       if (marker.pr) req.pr = Number(marker.pr);
       if (marker.branch) req.branch = marker.branch;
       round.previewUrl = marker.preview || previewUrlFor(site, req.branch);
+      req.readyRoundId = round.id; // 最新預覽是哪一輪發的：這一輪的［上線］在出現更新的預覽前都有效
       if (round.notified) return; // 同一則回報重送時不重複通知
       round.notified = true;
       await line.push(req.userId, msg.readyForRequester(req, site));
@@ -369,25 +379,35 @@ async function onWorkflowReport(req, site, marker, createdAt, env, deps) {
     case "cancel":
       round.status = "cancel";
       round.notified = true;
-      await line.push(req.userId, [msg.cancelOption(req, site, msg.askCancel(req, site))]);
+      // 已經有預覽就只問一句（改好通知上的［取消這件］還有效）；還沒有任何修改才附按鈕
+      await line.push(req.userId, [
+        hasPreview(req) ? msg.plain(msg.askCancel(req, site)) : msg.cancelOnly(req, site, msg.askCancel(req, site)),
+      ]);
       return;
     case "question":
     case "nochange":
       round.status = marker.status;
       round.notified = true;
-      await line.push(req.userId, [msg[marker.status](req, marker.text), msg.cancelOption(req, site)]);
+      await line.push(req.userId, withCancel(req, site, msg[marker.status](req, marker.text)));
       return;
     default: // error
       round.status = "error";
       round.notified = true;
       if (isAdmin(env, req.userId)) {
-        await line.push(req.userId, [msg.errorForAdmin(req, site, marker.text), msg.cancelOption(req, site)]);
+        await line.push(req.userId, withCancel(req, site, msg.errorForAdmin(req, site, marker.text)));
       } else {
-        await line.push(req.userId, [msg.errorForRequester(req), msg.cancelOption(req, site)]);
+        await line.push(req.userId, withCancel(req, site, msg.errorForRequester(req)));
         await line.push(env.ADMIN_USER_ID, [msg.errorForAdmin(req, site, marker.text)]);
       }
   }
 }
+
+// 已經有預覽就只傳文字（改好通知上的按鈕還有效）；還沒有任何修改才附［取消這件］
+function withCancel(req, site, lead) {
+  return hasPreview(req) ? [lead] : [lead, msg.cancelOnly(req, site)];
+}
+
+const hasPreview = (req) => Boolean(req.readyRoundId && req.pr);
 
 // ── 排程：補做漏接的回報 ─────────────────────────────────
 
@@ -401,6 +421,17 @@ export async function handleScheduled(env, deps) {
   }
 }
 
+// 這一輪在 GitHub 上最新的 workflow 回報（還沒有就是 undefined）
+async function latestReport(req, site, deps) {
+  const since = new Date(req.round.startedAt - CLOCK_SKEW_MS).toISOString();
+  const res = await deps.gh(site).listComments(req.issue, since);
+  return (res.ok && Array.isArray(res.data) ? res.data : [])
+    .filter((c) => c.user?.login === WORKFLOW_BOT && inThisRound(req, c.created_at))
+    .map((c) => ({ marker: parseMarker(c.body), createdAt: c.created_at }))
+    .filter((x) => x.marker)
+    .at(-1);
+}
+
 // GitHub 的 webhook 偶爾會漏送或送失敗；超過時間還沒收到回報，就以 GitHub 上的留言為準補做。
 async function reconcile(req, env, deps) {
   const r = req.round;
@@ -409,13 +440,7 @@ async function reconcile(req, env, deps) {
   const site = siteById(env, req.site);
   if (!site) return;
 
-  const since = new Date(r.startedAt - CLOCK_SKEW_MS).toISOString();
-  const res = await deps.gh(site).listComments(req.issue, since);
-  const latest = (res.ok && Array.isArray(res.data) ? res.data : [])
-    .filter((c) => c.user?.login === WORKFLOW_BOT && inThisRound(req, c.created_at))
-    .map((c) => ({ marker: parseMarker(c.body), createdAt: c.created_at }))
-    .filter((x) => x.marker)
-    .at(-1);
+  const latest = await latestReport(req, site, deps);
   if (!latest) return; // workflow 還在跑
   await onWorkflowReport(req, site, latest.marker, latest.createdAt, env, deps);
   await deps.st.putRequest(req);

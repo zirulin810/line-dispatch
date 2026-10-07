@@ -14,30 +14,32 @@ export const msg = {
   textOnly: () => text("目前只看得懂文字訊息，請用文字描述要改哪裡。"),
   failed: () => text("抱歉，系統暫時出了點問題，請稍後再傳一次。"),
 
-  // 改好了：只給提出者，由他決定上線或退回
-  readyForRequester: (req, site) => {
-    const data = (a) => `a=${a}&s=${site.id}&n=${req.issue}&r=${req.round.id}&pr=${req.pr ?? ""}`;
-    return [
-      text(
-        `${site.name} #${req.issue} 改好了，可以先看看預覽：\n${req.round.previewUrl}\n\n${req.round.summary}\n\n` +
-          "確認沒問題就按［上線］；還想調整就直接傳訊息告訴我。",
-      ),
-      buttons(`#${req.issue} 要上線嗎？`, `#${req.issue} 要上線嗎？`, [
-        { type: "uri", label: "看預覽", uri: req.round.previewUrl },
-        postback("上線", data("approve"), `#${req.issue} 上線`),
-        postback("退回", data("reject"), `#${req.issue} 退回`),
-      ]),
-    ];
-  },
+  // 改好了：只給提出者，由他決定上線或取消
+  readyForRequester: (req, site) => [
+    text(
+      `${site.name} #${req.issue} 改好了，可以先看看預覽：\n${req.round.previewUrl}\n\n${req.round.summary}\n\n` +
+        "確認沒問題就按［上線］；還想調整就直接傳訊息告訴我。",
+    ),
+    msg.caseButtons(req, site, `#${req.issue} 要上線嗎？`),
+  ],
 
-  // 取消只有這一種按鈕：
-  //   ・提出者說不做了 → 直接跳這個（prompt 用預設的「要取消嗎」）
-  //   ・做不到（反問、沒有要改的、失敗）→ 先說明原因，後面附這個
-  // 按下就結案；要繼續就直接回覆，新訊息會開新一輪，這顆按鈕自動失效
-  cancelOption: (req, site, prompt = "不想繼續這件的話可以直接取消；要繼續就直接回覆我。") =>
+  // 按鈕只有兩組：
+  //   ・新的預覽（改好通知）：［看預覽］［上線］［取消這件］，出現更新的預覽前都有效
+  //   ・還沒有任何修改時的反問、沒有要改的、失敗、要取消嗎：只有［取消這件］，對方回覆後就失效
+  caseButtons: (req, site, prompt) => {
+    // r：按鈕屬於哪一輪
+    const data = (a) => `a=${a}&s=${site.id}&n=${req.issue}&r=${req.round.id}&pr=${req.pr ?? ""}`;
+    return buttons(`#${req.issue} 要上線嗎？`, prompt, [
+      { type: "uri", label: "看預覽", uri: req.round.previewUrl },
+      postback("上線", data("approve"), `#${req.issue} 上線`),
+      postback("取消這件", data("cancel"), `取消 #${req.issue}`),
+    ]);
+  },
+  cancelOnly: (req, site, prompt = "不想繼續這件的話可以直接取消；要繼續就直接回覆我。") =>
     buttons(`要取消 #${req.issue} 嗎？`, prompt, [
       postback("取消這件", `a=cancel&s=${site.id}&n=${req.issue}&r=${req.round.id}&pr=${req.pr ?? ""}`, `取消 #${req.issue}`),
     ]),
+  plain: (t) => text(t),
   askCancel: (req, site) => `要取消${site.name} #${req.issue} 嗎？要繼續的話直接回覆我就好。`,
   cancelled: (req) => text(`#${req.issue} 已取消。之後有要改的，直接傳訊息就好。`),
 
@@ -47,15 +49,15 @@ export const msg = {
   errorForRequester: (req) => text(`#${req.issue} 這次沒有改成功，已經通知管理員處理。`),
   errorForAdmin: (req, site, body) => text(`⚠️ ${site.name} #${req.issue} 執行失敗\n\n${body}`),
 
-  // 上線／退回
+  // 上線
   merged: (req) => text(`#${req.issue} 已上線 🎉 網站約 1～2 分鐘後更新。`),
-  rejected: (req) => text(`#${req.issue} 這次的修改沒有上線。還需要的話，直接再傳一次訊息就好。`),
   // 給管理者：<網站> <用戶> 上線／上線內容：<變更連結>
   mergedForAdmin: (req, site) =>
     text(`${site.name} ${req.name ?? "有人"} 上線\n上線內容：https://github.com/${site.repo}/pull/${req.pr}/files`),
 
   onlyRequester: () => text("只有提出這件修改的人可以按這個按鈕。"),
-  staleButton: (issue) => text(`這是 #${issue} 比較舊的預覽，請用最新一則通知的按鈕。`),
+  stillWorking: (issue) => text(`#${issue} 正在修改中，改好會再通知你。`),
+  staleButton: (issue) => text(`這是 #${issue} 比較舊的按鈕，請用最新一則通知上的按鈕。`),
   alreadyDone: (issue) => text(`#${issue} 已經處理過了。`),
   mergeFailed: (issue) => text(`#${issue} 上線失敗（可能有衝突或還在檢查中），已經通知管理員。`),
   mergeFailedForAdmin: (req, site) =>
