@@ -63,6 +63,15 @@ npm install
 npx wrangler login          # 會開瀏覽器授權 Cloudflare 帳號
 ```
 
+### 1-1. 建立預覽站（Cloudflare Pages）
+
+Workers & Pages → Create → 切到 **Pages**（預設是 Worker，別走錯）→ Import an existing Git repository → 選網站的 repo：
+
+- Project name：與 `wrangler.toml` 的 `pagesProject`、網站 workflow 的 `PAGES_PROJECT` 相同（例如 `my-site-edit-preview`）
+- Production branch：`main`；Framework preset：`None`；Build command、Build output directory：**留空**
+
+建好後專案頁顯示的網址要是 `<專案名>.pages.dev`；顯示的是 `workers.dev` 就是建成 Worker 了，刪掉重建。
+
 ### 2. 建立 KV
 
 ```powershell
@@ -75,11 +84,11 @@ npx wrangler kv namespace create STATE
 
 到 [New fine-grained token](https://github.com/settings/personal-access-tokens/new)：
 
-- **Resource owner**：`my-site`
-- **Repository access**：Only select repositories → `my-site.github.io`
+- **Resource owner**：網站 repo 所屬的帳號或組織
+- **Repository access**：Only select repositories → 網站的 repo
 - **Repository permissions**：Contents「Read and write」、Issues「Read and write」、Pull requests「Read and write」（Metadata 會自動變成 Read-only）
 
-組織若要求審核 fine-grained token，到[組織的 token 設定](https://github.com/organizations/my-site/settings/personal-access-token-requests)核准。
+組織若要求審核 fine-grained token，到組織的 Settings → Personal access tokens → Pending requests 核准。
 這個 token 的擁有者就是開 issue、留言、合併 PR 的身分；它必須是 repo 協作者，workflow 才會被觸發。
 
 ### 4. 設定 secrets
@@ -114,7 +123,7 @@ npx wrangler deploy
 
 ### 7. 接上 GitHub
 
-[repo 的 Webhooks](https://github.com/my-org/my-site/settings/hooks) → Add webhook：
+網站 repo 的 Settings → Webhooks → Add webhook：
 
 - **Payload URL**：`<Worker 網址>/github/webhook`
 - **Content type**：`application/json`
