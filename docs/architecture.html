@@ -1,0 +1,197 @@
+<title>LINE 派工架構圖</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap">
+<style>
+  /* 版面：仿簡報的深色網路背景，單一 16:9 架構圖置中 */
+  :root {
+    --bg: #04070d;
+    --ink: #f4f7fb;
+    --muted: #a9b5c7;
+    --arrow: #d5dbe4;
+    --line: #06c755;
+    --cf: #f38020;
+    --gh: #1b1f24;
+    --claude: #d97757;
+    --font: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", sans-serif;
+    color-scheme: dark;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    padding-block: 24px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  .frame { max-width: 1366px; margin: 0 auto; overflow-x: auto; }
+  svg { display: block; width: 100%; min-width: 900px; height: auto; font-family: var(--font); }
+  .t1 { font-size: 34px; font-weight: 900; fill: var(--ink); }
+  .lbl { font-size: 19px; font-weight: 700; fill: var(--ink); }
+  .big { font-size: 26px; font-weight: 700; fill: var(--ink); }
+  .sub { font-size: 16px; font-weight: 500; fill: var(--muted); }
+  .arr { stroke: var(--arrow); stroke-width: 5; fill: none; }
+  .dash { stroke-dasharray: 10 9; stroke-width: 3; }
+</style>
+
+<div class="frame">
+<svg viewBox="0 0 1366 780" role="img" aria-label="LINE 派工系統架構圖">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="40%" r="75%">
+      <stop offset="0" stop-color="#0f1a2c"/>
+      <stop offset="1" stop-color="#04070d"/>
+    </radialGradient>
+    <linearGradient id="cloud" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbad41"/>
+      <stop offset="1" stop-color="#f38020"/>
+    </linearGradient>
+    <linearGradient id="kv" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7fa3a8"/>
+      <stop offset=".5" stop-color="#b9d3d6"/>
+      <stop offset="1" stop-color="#7fa3a8"/>
+    </linearGradient>
+    <marker id="head" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d5dbe4"/>
+    </marker>
+    <symbol id="line-logo" viewBox="0 0 120 120">
+      <rect width="120" height="120" rx="26" fill="#06c755"/>
+      <path d="M60 24c-25 0-45 16-45 36 0 18 16 33 37 35 2 1 1 4 1 7 0 3-1 6 3 4 6-3 31-19 41-31 5-5 8-10 8-15 0-20-20-36-45-36z" fill="#fff"/>
+      <text x="60" y="70" text-anchor="middle" font-size="27" font-weight="900" fill="#06c755" font-family="Arial, sans-serif">LINE</text>
+    </symbol>
+  </defs>
+
+  <rect width="1366" height="780" fill="url(#glow)"/>
+  <g id="net" stroke="#3a5378" stroke-opacity=".28" fill="#5f7ea8" fill-opacity=".45"></g>
+
+  <!-- 標題 -->
+  <text x="683" y="62" text-anchor="middle" class="t1">LINE 派工：用 LINE 改網站</text>
+  <text x="683" y="106" text-anchor="middle" class="t1">LINE Bot × Claude 自動修改網站架構圖</text>
+
+  <!-- Cloudflare Worker -->
+  <g>
+    <circle cx="632" cy="262" r="48" fill="url(#cloud)"/>
+    <circle cx="690" cy="228" r="66" fill="url(#cloud)"/>
+    <circle cx="750" cy="262" r="46" fill="url(#cloud)"/>
+    <rect x="586" y="250" width="212" height="58" rx="29" fill="url(#cloud)"/>
+    <path d="M650 238 H730" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <path d="M650 238 l18 -15 M650 238 l18 15" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <path d="M660 272 H740" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <path d="M740 272 l-18 -15 M740 272 l-18 15" stroke="#fff" stroke-width="9" stroke-linecap="round"/>
+    <text x="692" y="346" text-anchor="middle" class="big">Cloudflare Worker</text>
+  </g>
+  <text x="790" y="152" class="lbl">Web API 閘道</text>
+  <text x="790" y="176" class="lbl">JavaScript + Wrangler</text>
+
+  <!-- LINE Bot -->
+  <use href="#line-logo" x="122" y="206" width="118" height="118"/>
+  <text x="181" y="358" text-anchor="middle" class="big">LINE Bot</text>
+  <text x="181" y="388" text-anchor="middle" class="sub">Messaging API</text>
+
+  <!-- LINE 使用者 -->
+  <use href="#line-logo" x="122" y="476" width="118" height="118"/>
+  <text x="181" y="652" text-anchor="middle" class="big">LINE 使用者</text>
+  <text x="181" y="682" text-anchor="middle" class="sub">提出者・管理者</text>
+
+  <!-- KV -->
+  <g>
+    <path d="M603 488 V612 A80 22 0 0 0 763 612 V488" fill="url(#kv)"/>
+    <ellipse cx="683" cy="488" rx="80" ry="22" fill="#d3e6e8" stroke="#8fb1b5" stroke-width="2"/>
+    <text x="683" y="552" text-anchor="middle" font-size="25" font-weight="900" fill="#26414a">KV 儲存</text>
+    <text x="683" y="588" text-anchor="middle" font-size="19" font-weight="700" fill="#26414a">Cloudflare</text>
+    <text x="683" y="612" text-anchor="middle" font-size="19" font-weight="700" fill="#26414a">STATE</text>
+  </g>
+
+  <!-- GitHub -->
+  <g>
+    <rect x="1120" y="200" width="130" height="130" rx="22" fill="#24292f" stroke="#57606a" stroke-width="2"/>
+    <circle cx="1160" cy="238" r="11" fill="none" stroke="#fff" stroke-width="7"/>
+    <circle cx="1160" cy="294" r="11" fill="none" stroke="#fff" stroke-width="7"/>
+    <circle cx="1212" cy="250" r="11" fill="none" stroke="#fff" stroke-width="7"/>
+    <path d="M1160 249 V283 M1212 261 C1212 282 1180 274 1167 287" stroke="#fff" stroke-width="7" fill="none" stroke-linecap="round"/>
+  </g>
+  <text x="1185" y="358" text-anchor="middle" class="big">GitHub</text>
+  <text x="1185" y="388" text-anchor="middle" class="sub">網站 repo：issue・PR・分支</text>
+
+  <!-- GitHub Actions + Claude -->
+  <g>
+    <rect x="1120" y="470" width="130" height="130" rx="22" fill="#2088ff"/>
+    <circle cx="1185" cy="535" r="40" fill="none" stroke="#fff" stroke-width="8"/>
+    <path d="M1173 513 L1205 535 L1173 557 z" fill="#fff"/>
+    <circle cx="1250" cy="600" r="27" fill="var(--claude)" stroke="#04070d" stroke-width="4"/>
+    <path d="M1250 584 V616 M1234 600 H1266 M1239 589 L1261 611 M1261 589 L1239 611" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+  </g>
+  <text x="1185" y="652" text-anchor="middle" class="big">GitHub Actions</text>
+  <text x="1185" y="682" text-anchor="middle" class="sub">Claude Code 修改網站</text>
+
+  <!-- Cloudflare Pages -->
+  <g>
+    <rect x="872" y="500" width="126" height="96" rx="12" fill="#10161f" stroke="var(--cf)" stroke-width="4"/>
+    <path d="M872 524 H998" stroke="var(--cf)" stroke-width="3"/>
+    <circle cx="888" cy="512" r="4" fill="var(--cf)"/>
+    <circle cx="902" cy="512" r="4" fill="var(--cf)"/>
+    <circle cx="916" cy="512" r="4" fill="var(--cf)"/>
+    <rect x="888" y="538" width="56" height="8" rx="4" fill="#5f7ea8"/>
+    <rect x="888" y="554" width="94" height="8" rx="4" fill="#3a5378"/>
+    <rect x="888" y="570" width="76" height="8" rx="4" fill="#3a5378"/>
+  </g>
+  <text x="935" y="652" text-anchor="middle" class="big">Cloudflare Pages</text>
+  <text x="935" y="682" text-anchor="middle" class="sub">預覽網址 *.pages.dev</text>
+
+  <!-- 箭頭 -->
+  <path class="arr" d="M181 404 V458" marker-start="url(#head)" marker-end="url(#head)"/>
+  <path class="arr" d="M262 262 H566" marker-start="url(#head)" marker-end="url(#head)"/>
+  <path class="arr" d="M683 372 V452" marker-start="url(#head)" marker-end="url(#head)"/>
+  <path class="arr" d="M818 262 H1102" marker-start="url(#head)" marker-end="url(#head)"/>
+  <path class="arr" d="M1185 404 V456" marker-start="url(#head)" marker-end="url(#head)"/>
+  <path class="arr" d="M1108 548 H1012" marker-end="url(#head)"/>
+  <path class="arr dash" d="M935 700 Q560 800 258 562" marker-end="url(#head)"/>
+
+  <!-- 箭頭說明 -->
+  <text x="198" y="437" class="lbl">私訊修改需求</text>
+
+  <text x="414" y="218" text-anchor="middle" class="lbl">HTTP 推送</text>
+  <text x="414" y="242" text-anchor="middle" class="lbl">Webhook JSON</text>
+  <text x="414" y="298" text-anchor="middle" class="lbl">簽章驗證後解析訊息</text>
+  <text x="414" y="322" text-anchor="middle" class="lbl">Push API 回傳預覽＋按鈕</text>
+
+  <text x="664" y="405" text-anchor="end" class="lbl">好友審核狀態</text>
+  <text x="664" y="429" text-anchor="end" class="lbl">每件的進度</text>
+
+  <text x="960" y="218" text-anchor="middle" class="lbl">REST API：開 issue／留言</text>
+  <text x="960" y="242" text-anchor="middle" class="lbl">合併或關閉 PR</text>
+  <text x="960" y="298" text-anchor="middle" class="lbl">Webhook 回報結果</text>
+  <text x="960" y="322" text-anchor="middle" class="lbl">Cron 每 5 分鐘對帳</text>
+
+  <text x="1168" y="428" text-anchor="end" class="lbl">issue 事件觸發</text>
+  <text x="1168" y="452" text-anchor="end" class="lbl">push・開 PR</text>
+
+  <text x="1060" y="534" text-anchor="middle" class="lbl">部署</text>
+
+  <text x="560" y="756" text-anchor="middle" class="sub">提出者按［看預覽］確認後再按［上線］</text>
+</svg>
+</div>
+
+<script>
+  // 背景的網路節點，固定亂數種子讓每次畫面一樣
+  (function () {
+    var g = document.getElementById("net"), ns = "http://www.w3.org/2000/svg";
+    var s = 7, rnd = function () { s = (s * 16807) % 2147483647; return s / 2147483647; };
+    var pts = [];
+    for (var i = 0; i < 55; i++) pts.push([rnd() * 1366, rnd() * 800]);
+    pts.forEach(function (p, i) {
+      pts.forEach(function (q, j) {
+        if (j <= i) return;
+        var d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+        if (d < 190) {
+          var l = document.createElementNS(ns, "line");
+          l.setAttribute("x1", p[0]); l.setAttribute("y1", p[1]);
+          l.setAttribute("x2", q[0]); l.setAttribute("y2", q[1]);
+          g.appendChild(l);
+        }
+      });
+      var c = document.createElementNS(ns, "circle");
+      c.setAttribute("cx", p[0]); c.setAttribute("cy", p[1]); c.setAttribute("r", 2.5);
+      g.appendChild(c);
+    });
+  })();
+</script>
